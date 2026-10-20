@@ -1,0 +1,14 @@
+services:
+  - type: web
+    plan: free
+    name: palse-api
+    runtime: python
+    rootDir: /backend
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uv run fastapi run"
+    region: "singapore"
+    healthCheckPath: /health
+    autoDeploy: checksPass
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.7
