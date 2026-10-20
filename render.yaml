@@ -4,7 +4,7 @@ services:
     name: palse-api
     runtime: python
     rootDir: backend
-    buildCommand: "pip install -r requirements.txt"
+    buildCommand: "uv sync"
     startCommand: "uv run fastapi run"
     region: "singapore"
     healthCheckPath: /health
@@ -12,3 +12,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.14.7
+      - key: UV_VERSION
+        value: 0.11.21
