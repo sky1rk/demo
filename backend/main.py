@@ -4,5 +4,5 @@ app = FastAPI()
 
 
 @app.get("/health")
-async def health() -> dict:
-    return {"status": "healthy"}
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
