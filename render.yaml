@@ -3,7 +3,7 @@ services:
     plan: free
     name: palse-api
     runtime: python
-    rootDir: /backend
+    rootDir: backend
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uv run fastapi run"
     region: "singapore"
