@@ -14,7 +14,7 @@ export default function SideHero() {
         />
         <img
           className="absolute bottom-80 right-[-8em] h-100 z-20 rotate-[-18deg]"
-          src="images/rob1.png"
+          src="/images/rob1.png"
         />
         <BrandMastHead compact={false} />
         <div className="flex flex-col bg-theme-white/5 px-12 pt-12 pb-8 rounded-xl gap-6 z-10">

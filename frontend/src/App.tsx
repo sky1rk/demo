@@ -2,10 +2,17 @@ import { useEffect } from "react";
 import { Navigate, Routes, Route, useNavigate } from "react-router-dom";
 
 import { AuthSplash, GuestOnly, RequireAuth } from "./components/AuthGuard.tsx";
+import AppLayout from "./components/AppLayout.tsx";
 import { useAuth } from "./context/useAuth";
 import Dashboard from "./pages/Dashboard.tsx";
+import EditPatientPage from "./pages/EditPatientPage.tsx";
 import ForgotPassword from "./pages/ForgotPassword.tsx";
+import MonitorPage from "./pages/MonitorPage.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import PatientsPage from "./pages/PatientsPage.tsx";
+import ProfilePage from "./pages/ProfilePage.tsx";
+import ProfileSecurityPage from "./pages/ProfileSecurityPage.tsx";
+import ReportsPage from "./pages/ReportsPage.tsx";
 import ResetPassword from "./pages/ResetPassword.tsx";
 import Signin from "./pages/Signin.tsx";
 import Signup from "./pages/Signup.tsx";
@@ -53,13 +60,20 @@ function App() {
         />
         <Route path="/reset-password" element={<ResetPassword />} />
         <Route
-          path="/dashboard"
           element={
             <RequireAuth>
-              <Dashboard />
+              <AppLayout />
             </RequireAuth>
           }
-        />
+        >
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/patients" element={<PatientsPage />} />
+          <Route path="/patients/:id/edit" element={<EditPatientPage />} />
+          <Route path="/monitor" element={<MonitorPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/profile/security" element={<ProfileSecurityPage />} />
+        </Route>
         <Route path="/" element={<HomeRedirect />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
