@@ -1,1 +1,79 @@
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
 @import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica,
+    Arial, sans-serif;
+
+  --color-theme-maroon: #5b1616;
+  --color-theme-maroon-hover: #6f1d1d;
+  --color-theme-white: #fbf8f5;
+  --color-theme-light-gray: #f3f2ee;
+  --color-theme-gray: #9a8f8c;
+  --color-theme-line: #e8e3dd;
+  --color-theme-ink: #0f1720;
+  --color-theme-ink-soft: #2b2b2b;
+
+  /* Legacy auth palette (templates/login.html, templates/signup.html) */
+  --color-theme-crimson: #661818;
+  --color-theme-crimson-hover: #7d1f1f;
+  --color-theme-cream: #f8eded;
+  --color-theme-field: #f6f1ee;
+  --color-theme-field-text: #4f4f4f;
+  --color-theme-placeholder: #a0a0a0;
+
+  /* Risk tiers (static/css/patients.css) */
+  --color-risk-high-bg: #fde7e7;
+  --color-risk-high-fg: #b42318;
+  --color-risk-moderate-bg: #fff3cf;
+  --color-risk-moderate-fg: #9a5b00;
+  --color-risk-low-bg: #e8f5ee;
+  --color-risk-low-fg: #1f7a45;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--color-theme-light-gray);
+    color: var(--color-theme-ink-soft);
+  }
+
+  ::selection {
+    background-color: color-mix(
+      in srgb,
+      var(--color-theme-crimson) 18%,
+      transparent
+    );
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(15, 23, 32, 0.18) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: rgba(15, 23, 32, 0.16);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(15, 23, 32, 0.28);
+  }
+}
