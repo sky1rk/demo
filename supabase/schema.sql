@@ -192,7 +192,6 @@ comment on table public.assessments is
 
 create index if not exists assessments_patient_id_idx on public.assessments (patient_id);
 create index if not exists assessments_created_by_idx on public.assessments (created_by);
-create index if not exists assessments_predicted_at_idx on public.assessments (predicted_at);
 
 alter table public.assessments enable row level security;
 
@@ -243,6 +242,8 @@ create trigger assessments_touch_updated_at
 alter table public.assessments
   add column if not exists prediction jsonb,
   add column if not exists predicted_at timestamptz;
+
+create index if not exists assessments_predicted_at_idx on public.assessments (predicted_at);
 
 comment on column public.assessments.prediction is
   'StoredPrediction JSONB: probability, risk_label, decision_threshold, predicted_eos, xgb/tft branch probabilities, tft_source, inference_ms, interpretation, recommended_actions.';
