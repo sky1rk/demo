@@ -29,7 +29,7 @@ REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() != "false"
 
 # Directory holding the EOS model artifacts (eos_xgboost_pipeline.joblib,
 # eos_residual_ensemble.joblib, eos_tft_state_dict.pt). Overridable for
-# Docker/local layouts; defaults to ml-service/models next to this package.
+# Docker/local layouts; defaults to service/models next to this package.
 MODEL_DIR = os.getenv(
     "MODEL_DIR",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models"),

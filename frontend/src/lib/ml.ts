@@ -2,7 +2,7 @@ import type { AssessmentSections } from "./assessment.ts";
 import { supabase } from "./supabase.ts";
 
 /**
- * Client for the EOS inference service (`ml-service/`, hosted on Render).
+ * Client for the EOS inference service (`service/`, hosted on Render).
  *
  * The request payload uses the legacy dashboard's snake_case contract — the
  * saved XGBoost/TFT/residual artifacts were trained on exactly that shape, so

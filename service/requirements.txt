@@ -1,4 +1,4 @@
-# EOS inference service (Render web service, rootDir ml-service).
+# EOS inference service (Render web service, rootDir service).
 # scikit-learn/xgboost are pinned to the era of the saved artifacts — newer
 # sklearn cannot unpickle the imputers. torch/pytorch-forecasting are
 # intentionally absent: predict_tft() uses the vital-sign heuristic fallback

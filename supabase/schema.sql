@@ -188,7 +188,7 @@ create table if not exists public.assessments (
 );
 
 comment on table public.assessments is
-  'Wizard intake data per patient. Scored by the EOS inference service (ml-service); results land in the prediction column.';
+  'Wizard intake data per patient. Scored by the EOS inference service (service/); results land in the prediction column.';
 
 create index if not exists assessments_patient_id_idx on public.assessments (patient_id);
 create index if not exists assessments_created_by_idx on public.assessments (created_by);
