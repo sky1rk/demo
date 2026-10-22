@@ -556,6 +556,29 @@ export default function EditPatientPage() {
             />
           </Panel>
 
+          {/* Neonatal section is wizard-owned; shown read-only here. */}
+          <Panel title="Neonatal context" subtitle="Read-only · from the latest assessment">
+            <dl className="grid gap-4 md:grid-cols-4">
+              {(
+                [
+                  ["Age at admission (h)", latest.row.neonatal.ageAtAdmissionHours.trim()],
+                  ["APGAR 1 min", latest.row.neonatal.apgarOneMinute.trim()],
+                  ["APGAR 5 min", latest.row.neonatal.apgarFiveMinutes.trim()],
+                  ["APGAR 10 min", latest.row.neonatal.apgarTenMinutes.trim()],
+                ] as ReadonlyArray<readonly [string, string]>
+              ).map(([label, value]) => (
+                <div key={label} className="flex flex-col gap-1">
+                  <dt className="text-xs font-bold uppercase tracking-wide text-theme-gray">
+                    {label}
+                  </dt>
+                  <dd className="text-sm tabular-nums text-theme-ink">
+                    {value === "" ? "—" : value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </Panel>
+
           <Panel title="Laboratory Results">
             <LabFields
               value={labs}

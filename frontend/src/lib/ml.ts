@@ -64,9 +64,10 @@ function numberField(value: string): number | undefined {
  *              multiple_birth                                    (model: static)
  * maternal:    maternal_age_years, anc_4plus, prom_over_18h, maternal_fever,
  *              maternal_uti, maternal_hiv                        (model: static)
- * neonatal:    age_at_onset_hours, apgar_5min + the six observed-sign
- *              binaries (legacy apgar_1min is derived from apgar_5min by the
- *              feature mapper)                                   (model: static)
+ * neonatal:    age_at_onset_hours, apgar_1min (real feature; the wizard
+ *              captures it), apgar_5min, apgar_10min (informational — the
+ *              service ignores unknown keys) + the six observed-sign
+ *              binaries                                          (model: static)
  * vitals:      temperature_c, heart_rate_bpm, blood_pressure,
  *              oxygen_saturation_pct, respiratory_rate_bpm       (model: static+TFT)
  * laboratory:  crp_mg_l, wbc_count, platelet_count — omitted keys become
@@ -97,7 +98,11 @@ export function sectionsToMlPayload(sections: AssessmentSections): Record<string
     maternal_hiv: binary(maternal.hivPositive),
 
     age_at_onset_hours: numberField(neonatal.ageAtAdmissionHours),
+    // apgar_1min feeds the artifact's apgar_delta feature directly; when the
+    // field is blank the service still derives it as apgar_5min − 1.
+    apgar_1min: numberField(neonatal.apgarOneMinute),
     apgar_5min: numberField(neonatal.apgarFiveMinutes),
+    apgar_10min: numberField(neonatal.apgarTenMinutes),
     poor_feeding: binary(neonatal.poorFeeding),
     lethargy: binary(neonatal.lethargy),
     convulsions: binary(neonatal.convulsions),

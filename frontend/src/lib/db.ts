@@ -3,11 +3,16 @@ import {
   type AssessmentSections,
   type AssessmentStatus,
   type ClinicalSections,
+  type NeonatalSection,
   type StoredPrediction,
 } from "./assessment.ts";
 import type { PredictionResult } from "./ml.ts";
 import { type Outcome, type Patient, type RiskLevel, type Sex } from "./patient.ts";
 import { supabase } from "./supabase.ts";
+import {
+  type NewVitalObservation,
+  type VitalObservation,
+} from "./vitals.ts";
 
 /**
  * Direct Supabase data access for the clinical app. The EOS inference service
@@ -232,6 +237,19 @@ export function assessmentPrediction(assessment: Assessment): PredictionResult |
     : toPredictionResult(assessment.prediction);
 }
 
+/**
+ * older rows were stored before apgar_1min/apgar_10min existed (schema's
+ * neonatal JSONB has no column constraints), so pre-fill them to keep
+ * controlled inputs well-defined.
+ */
+function toNeonatal(raw: AssessmentSections["neonatal"]): NeonatalSection {
+  return {
+    ...raw,
+    apgarOneMinute: raw.apgarOneMinute ?? "",
+    apgarTenMinutes: raw.apgarTenMinutes ?? "",
+  };
+}
+
 function toAssessment(row: AssessmentRow): Assessment {
   return {
     id: row.id,
@@ -240,7 +258,7 @@ function toAssessment(row: AssessmentRow): Assessment {
     status: row.status,
     demographic: row.demographic,
     maternal: row.maternal,
-    neonatal: row.neonatal,
+    neonatal: toNeonatal(row.neonatal),
     vitals: row.vitals,
     laboratory: row.laboratory,
     treatment: row.treatment,
@@ -427,5 +445,90 @@ export async function setPatientOutcome(
   outcome: Outcome,
 ): Promise<void> {
   const { error } = await supabase.from("patients").update({ outcome }).eq("id", patientId);
+  if (error != null) throw error;
+}
+
+/* ------------------------- Vital observations ---------------------------- */
+
+type VitalObservationRow = {
+  id: string;
+  created_by: string;
+  patient_id: string;
+  assessment_id: string | null;
+  recorded_at: string;
+  heart_rate_bpm: number | null;
+  temperature_c: number | null;
+  sbp_mmhg: number | null;
+  dbp_mmhg: number | null;
+  oxygen_saturation_pct: number | null;
+  respiratory_rate_per_min: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+function toVitalObservation(row: VitalObservationRow): VitalObservation {
+  return {
+    id: row.id,
+    createdBy: row.created_by,
+    patientId: row.patient_id,
+    assessmentId: row.assessment_id,
+    recordedAt: row.recorded_at,
+    heartRateBpm: row.heart_rate_bpm,
+    temperatureC: row.temperature_c,
+    sbpMmHg: row.sbp_mmhg,
+    dbpMmHg: row.dbp_mmhg,
+    oxygenSaturationPct: row.oxygen_saturation_pct,
+    respiratoryRatePerMin: row.respiratory_rate_per_min,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A patient's vital readings over time, newest first — the earlier/later
+ * records behind /monitor's charts. Capped so the dashboard stays snappy;
+ * the cap is well above any realistic chart window.
+ */
+export async function listVitalObservations(
+  patientId: string,
+  limit = 200,
+): Promise<VitalObservation[]> {
+  const { data, error } = await supabase
+    .from("vital_observations")
+    .select("*")
+    .eq("patient_id", patientId)
+    .order("recorded_at", { ascending: false })
+    .limit(limit);
+
+  if (error != null) throw error;
+  return ((data ?? []) as VitalObservationRow[]).map(toVitalObservation);
+}
+
+export async function addVitalObservation(
+  input: NewVitalObservation,
+): Promise<VitalObservation> {
+  const { data, error } = await supabase
+    .from("vital_observations")
+    .insert({
+      patient_id: input.patientId,
+      assessment_id: input.assessmentId ?? null,
+      recorded_at: input.recordedAt,
+      heart_rate_bpm: input.heartRateBpm,
+      temperature_c: input.temperatureC,
+      sbp_mmhg: input.sbpMmHg,
+      dbp_mmhg: input.dbpMmHg,
+      oxygen_saturation_pct: input.oxygenSaturationPct,
+      respiratory_rate_per_min: input.respiratoryRatePerMin,
+    })
+    .select("*")
+    .single();
+
+  if (error != null) throw error;
+  return toVitalObservation(data as VitalObservationRow);
+}
+
+/** Not offered for other users' rows — the delete policy only allows creators. */
+export async function deleteVitalObservation(id: string): Promise<void> {
+  const { error } = await supabase.from("vital_observations").delete().eq("id", id);
   if (error != null) throw error;
 }

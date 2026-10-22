@@ -104,7 +104,9 @@ const EMPTY_SECTIONS: AssessmentSections = {
   },
   neonatal: {
     ageAtAdmissionHours: "",
+    apgarOneMinute: "",
     apgarFiveMinutes: "",
+    apgarTenMinutes: "",
     poorFeeding: false,
     lethargy: false,
     convulsions: false,
@@ -824,18 +826,49 @@ function NeonatalStep({
             patch("neonatal", { ageAtAdmissionHours: event.target.value })
           }
         />
-        <FormInput
-          id="apgar-five"
-          label="APGAR (5 min)"
-          placeholder="e.g. 7"
-          type="number"
-          min={0}
-          max={10}
-          value={neonatal.apgarFiveMinutes}
-          onChange={(event) =>
-            patch("neonatal", { apgarFiveMinutes: event.target.value })
-          }
-        />
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-theme-ink">
+            APGAR score (1 / 5 / 10 min)
+          </span>
+          <div className="grid grid-cols-3 gap-3">
+            <FormInput
+              id="apgar-one"
+              label="1 min"
+              placeholder="e.g. 6"
+              type="number"
+              min={0}
+              max={10}
+              value={neonatal.apgarOneMinute}
+              onChange={(event) =>
+                patch("neonatal", { apgarOneMinute: event.target.value })
+              }
+            />
+            <FormInput
+              id="apgar-five"
+              label="5 min"
+              placeholder="e.g. 7"
+              type="number"
+              min={0}
+              max={10}
+              value={neonatal.apgarFiveMinutes}
+              onChange={(event) =>
+                patch("neonatal", { apgarFiveMinutes: event.target.value })
+              }
+            />
+            <FormInput
+              id="apgar-ten"
+              label="10 min"
+              placeholder="e.g. 8"
+              type="number"
+              min={0}
+              max={10}
+              value={neonatal.apgarTenMinutes}
+              onChange={(event) =>
+                patch("neonatal", { apgarTenMinutes: event.target.value })
+              }
+            />
+          </div>
+        </div>
       </div>
       <ChipGroup<SignKey>
         legend="Observed signs"
@@ -1229,14 +1262,22 @@ function validateStep(
       return null;
     }
     case 3: {
-      const { ageAtAdmissionHours, apgarFiveMinutes } = sections.neonatal;
+      const { ageAtAdmissionHours, apgarOneMinute, apgarFiveMinutes, apgarTenMinutes } =
+        sections.neonatal;
       const age = ageAtAdmissionHours.trim();
-      const apgar = apgarFiveMinutes.trim();
       if (age !== "" && !withinRange(Number(age), 0, 30 * 24)) {
         return "Age (h) must be a number of hours between 0 and 720.";
       }
-      if (apgar !== "" && !withinRange(Number(apgar), 0, 10)) {
-        return "APGAR (5 min) must be a number between 0 and 10.";
+      const scores: ReadonlyArray<readonly [string, string]> = [
+        ["APGAR (1 min)", apgarOneMinute],
+        ["APGAR (5 min)", apgarFiveMinutes],
+        ["APGAR (10 min)", apgarTenMinutes],
+      ];
+      for (const [label, raw] of scores) {
+        const apgar = raw.trim();
+        if (apgar !== "" && !withinRange(Number(apgar), 0, 10)) {
+          return `${label} must be a number between 0 and 10.`;
+        }
       }
       return null;
     }
