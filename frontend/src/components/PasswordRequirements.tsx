@@ -1,4 +1,4 @@
-import CheckIcon from "../assets/icons/check.svg";
+import MsIcon from "./MsIcon.tsx";
 import { passwordChecks } from "../lib/password.ts";
 
 /**
@@ -15,7 +15,7 @@ export default function PasswordRequirements({ password }: { password: string })
   if (!incomplete) {
     return (
       <p className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-risk-low-fg">
-        <img src={CheckIcon} alt="" className="h-3.5 w-3.5" aria-hidden />
+        <MsIcon name="check_circle" fill={1} className="text-[14px]" optical={20} />
         Meets all requirements
       </p>
     );
@@ -31,7 +31,7 @@ export default function PasswordRequirements({ password }: { password: string })
           }`}
         >
           {check.passed ? (
-            <img src={CheckIcon} alt="" className="h-3.5 w-3.5" aria-hidden />
+            <MsIcon name="check" fill={1} className="text-[14px]" optical={20} />
           ) : (
             <span className="h-1.5 w-1.5 rounded-full bg-theme-line" aria-hidden />
           )}

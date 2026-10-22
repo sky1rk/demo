@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import EmailIcon from "../assets/icons/email.svg";
+import MsIcon from "./MsIcon.tsx";
 
 /**
  * "Check your inbox" confirmation screen shared by signup and the
@@ -21,7 +21,7 @@ export default function CheckInbox({
   return (
     <div className="mx-auto max-w-90 py-8 text-center">
       <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-theme-cream">
-        <img src={EmailIcon} alt="" className="h-7 w-7" aria-hidden />
+        <MsIcon name="mark_email_read" className="text-[28px] text-theme-maroon" optical={28} />
       </div>
 
       <h1 className="text-2xl font-bold">{title}</h1>

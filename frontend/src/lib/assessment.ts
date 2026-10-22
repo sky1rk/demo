@@ -24,7 +24,11 @@ export interface MaternalSection {
 /** Section 3 — Neonatal Clinical Signs. */
 export interface NeonatalSection {
   ageAtAdmissionHours: string;
+  /** Optional minutes-1 score; the legacy stack derived it as 5min − 1. */
+  apgarOneMinute: string;
   apgarFiveMinutes: string;
+  /** Minutes-10 score — informational context, not a current model feature. */
+  apgarTenMinutes: string;
   poorFeeding: boolean;
   lethargy: boolean;
   convulsions: boolean;

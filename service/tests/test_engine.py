@@ -30,7 +30,11 @@ CANONICAL_PAYLOAD = {
     "birth_weight_g": 1800,
     "delivery_mode": "vaginal",
     "age_at_onset_hours": 8,
+    # apgar_1min is a true model feature (feeds apgar_delta); apgar_10min must
+    # be tolerated as an unknown key by the feature mapper.
+    "apgar_1min": 7,
     "apgar_5min": 8,
+    "apgar_10min": 9,
     "poor_feeding": 1,
     "respiratory_distress": 1,
     "temperature_c": 38.1,

@@ -297,3 +297,108 @@ alter table public.patients
 
 alter table public.assessments
   alter column created_by set default auth.uid();
+
+-- ---------------------------------------------------------------------------
+-- 9. Clinical data: vital_observations (schema v6)
+--    Time series behind /monitor's live charts: one row per recorded set of
+--    readings. Earlier/later ordering is `recorded_at`, which the clinician
+--    may backdate — the wizard's vitals remain point-in-time snapshots on
+--    the assessment row, while this table accumulates every reading.
+--    An observation must carry at least one vital value.
+--    Idempotent re-run safe.
+-- ---------------------------------------------------------------------------
+create table if not exists public.vital_observations (
+  id uuid primary key default gen_random_uuid(),
+  created_by uuid not null default auth.uid()
+    references auth.users (id) on delete cascade,
+  patient_id uuid not null references public.patients (id) on delete cascade,
+  assessment_id uuid references public.assessments (id) on delete set null,
+  recorded_at timestamptz not null default now(),
+  heart_rate_bpm numeric
+    constraint vital_observations_hr_range check (heart_rate_bpm between 0 and 400),
+  temperature_c numeric
+    constraint vital_observations_temp_range check (temperature_c between 25 and 45),
+  sbp_mmhg numeric
+    constraint vital_observations_sbp_range check (sbp_mmhg between 0 and 300),
+  dbp_mmhg numeric
+    constraint vital_observations_dbp_range check (dbp_mmhg between 0 and 200),
+  oxygen_saturation_pct numeric
+    constraint vital_observations_o2_range check (oxygen_saturation_pct between 0 and 100),
+  respiratory_rate_per_min numeric
+    constraint vital_observations_rr_range check (respiratory_rate_per_min between 0 and 200),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint vital_observations_has_values check (
+    heart_rate_bpm is not null
+    or temperature_c is not null
+    or sbp_mmhg is not null
+    or dbp_mmhg is not null
+    or oxygen_saturation_pct is not null
+    or respiratory_rate_per_min is not null
+  )
+);
+
+comment on table public.vital_observations is
+  'Vital-sign readings over time (earlier/later records). Charts on /monitor read this time series; SBP/DBP are separate columns.';
+
+create index if not exists vital_observations_patient_recorded_idx
+  on public.vital_observations (patient_id, recorded_at desc);
+
+alter table public.vital_observations enable row level security;
+
+drop policy if exists vital_observations_team_select on public.vital_observations;
+create policy vital_observations_team_select
+  on public.vital_observations
+  for select
+  to authenticated
+  using (true);
+
+drop policy if exists vital_observations_insert_own on public.vital_observations;
+create policy vital_observations_insert_own
+  on public.vital_observations
+  for insert
+  to authenticated
+  with check (created_by = auth.uid());
+
+drop policy if exists vital_observations_update_own on public.vital_observations;
+create policy vital_observations_update_own
+  on public.vital_observations
+  for update
+  to authenticated
+  using (created_by = auth.uid())
+  with check (created_by = auth.uid());
+
+drop policy if exists vital_observations_delete_own on public.vital_observations;
+create policy vital_observations_delete_own
+  on public.vital_observations
+  for delete
+  to authenticated
+  using (created_by = auth.uid());
+
+drop trigger if exists vital_observations_touch_updated_at on public.vital_observations;
+create trigger vital_observations_touch_updated_at
+  before update
+  on public.vital_observations
+  for each row
+  execute function extensions.moddatetime(updated_at);
+
+alter table public.vital_observations
+  alter column created_by set default auth.uid();
+
+-- Realtime: charts subscribe to postgres_changes on this table. REPLICA
+-- IDENTITY FULL makes DELETE events carry the old row (so listeners can
+-- remove it by id); the publication addition is skipped when the table is
+-- already a member (adding twice raises a duplicate-object error).
+alter table public.vital_observations replica identity full;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'vital_observations'
+  ) then
+    alter publication supabase_realtime add table public.vital_observations;
+  end if;
+end $$;

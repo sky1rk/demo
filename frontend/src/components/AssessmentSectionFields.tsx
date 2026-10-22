@@ -1,5 +1,11 @@
 import ChipGroup from "./ChipGroup.tsx";
 import FormInput from "./FormInput.tsx";
+import {
+  LAB_FIELD_RANGES,
+  VITAL_FIELD_RANGES,
+  bloodPressureError,
+  rangeFieldError,
+} from "../lib/clinicalValidation.ts";
 import type {
   ComorbiditiesSection,
   LabSection,
@@ -42,9 +48,11 @@ export function VitalsFields({
         label="HR (bpm)"
         placeholder="HR (bpm)"
         type="number"
-        min={40}
-        max={260}
+        inputMode="numeric"
+        min={VITAL_FIELD_RANGES.heartRateBpm.min}
+        max={VITAL_FIELD_RANGES.heartRateBpm.max}
         value={value.heartRateBpm}
+        error={rangeFieldError(value.heartRateBpm, VITAL_FIELD_RANGES.heartRateBpm)}
         onChange={(event) => onChange({ heartRateBpm: event.target.value })}
       />
       <FormInput
@@ -53,9 +61,10 @@ export function VitalsFields({
         placeholder="Temp (°C)"
         type="number"
         step="0.1"
-        min={30}
-        max={45}
+        min={VITAL_FIELD_RANGES.temperatureC.min}
+        max={VITAL_FIELD_RANGES.temperatureC.max}
         value={value.temperatureC}
+        error={rangeFieldError(value.temperatureC, VITAL_FIELD_RANGES.temperatureC)}
         onChange={(event) => onChange({ temperatureC: event.target.value })}
       />
       <FormInput
@@ -64,6 +73,7 @@ export function VitalsFields({
         placeholder="e.g. 74/44"
         describedBy={`${idPrefix}-bp-format`}
         value={value.bloodPressure}
+        error={bloodPressureError(value.bloodPressure)}
         onChange={(event) => onChange({ bloodPressure: event.target.value })}
       />
       <FormInput
@@ -71,9 +81,11 @@ export function VitalsFields({
         label="O2 Sat (%)"
         placeholder="O2 Sat (%)"
         type="number"
-        min={40}
-        max={100}
+        inputMode="numeric"
+        min={VITAL_FIELD_RANGES.oxygenSaturationPct.min}
+        max={VITAL_FIELD_RANGES.oxygenSaturationPct.max}
         value={value.oxygenSaturationPct}
+        error={rangeFieldError(value.oxygenSaturationPct, VITAL_FIELD_RANGES.oxygenSaturationPct)}
         onChange={(event) => onChange({ oxygenSaturationPct: event.target.value })}
       />
       <FormInput
@@ -81,9 +93,11 @@ export function VitalsFields({
         label="Respiratory rate"
         placeholder="Resp Rate (/min)"
         type="number"
-        min={10}
-        max={130}
+        inputMode="numeric"
+        min={VITAL_FIELD_RANGES.respiratoryRatePerMin.min}
+        max={VITAL_FIELD_RANGES.respiratoryRatePerMin.max}
         value={value.respiratoryRatePerMin}
+        error={rangeFieldError(value.respiratoryRatePerMin, VITAL_FIELD_RANGES.respiratoryRatePerMin)}
         onChange={(event) => onChange({ respiratoryRatePerMin: event.target.value })}
       />
       <p id={`${idPrefix}-bp-format`} className="self-end text-xs text-theme-gray">
@@ -115,9 +129,11 @@ export function LabFields({
         label="CRP (mg/L)"
         placeholder="e.g. 18"
         type="number"
-        min={0}
-        max={500}
+        inputMode="numeric"
+        min={LAB_FIELD_RANGES.crpMgL.min}
+        max={LAB_FIELD_RANGES.crpMgL.max}
         value={value.crpMgL}
+        error={rangeFieldError(value.crpMgL, LAB_FIELD_RANGES.crpMgL)}
         onChange={(event) => onChange({ crpMgL: event.target.value })}
       />
       <FormInput
@@ -125,9 +141,11 @@ export function LabFields({
         label="WBC count (/µL)"
         placeholder="e.g. 14500"
         type="number"
-        min={0}
-        max={100000}
+        inputMode="numeric"
+        min={LAB_FIELD_RANGES.wbcCount.min}
+        max={LAB_FIELD_RANGES.wbcCount.max}
         value={value.wbcCount}
+        error={rangeFieldError(value.wbcCount, LAB_FIELD_RANGES.wbcCount)}
         onChange={(event) => onChange({ wbcCount: event.target.value })}
       />
       <FormInput
@@ -135,9 +153,11 @@ export function LabFields({
         label="Platelets (/µL)"
         placeholder="e.g. 210000"
         type="number"
-        min={0}
-        max={1000000}
+        inputMode="numeric"
+        min={LAB_FIELD_RANGES.plateletCount.min}
+        max={LAB_FIELD_RANGES.plateletCount.max}
         value={value.plateletCount}
+        error={rangeFieldError(value.plateletCount, LAB_FIELD_RANGES.plateletCount)}
         onChange={(event) => onChange({ plateletCount: event.target.value })}
       />
       <p className="self-end text-xs text-theme-gray">

@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 interface FormInputProps {
   id: string;
   label: string;
+  /** Required field: bold asterisk after the label + aria-required. */
+  required?: boolean;
   /** Optional supporting copy placed under the input. */
   hint?: string;
   /** Extra classes controlling hint visibility (e.g. height media queries). */
@@ -36,6 +38,7 @@ const invalidFieldClasses = [
 export default function FormInput({
   id,
   label,
+  required,
   hint,
   hintClass,
   error,
@@ -51,10 +54,21 @@ export default function FormInput({
     <div className="flex flex-col gap-1">
       <label htmlFor={id} className="text-sm font-medium text-theme-ink">
         {label}
+        {required ? (
+          <span
+            aria-hidden
+            className="ml-1 font-bold text-theme-maroon"
+            title="Required"
+          >
+            *
+          </span>
+        ) : null}
       </label>
       <div className="relative">
         <input
           id={id}
+          required={required}
+          aria-required={required || undefined}
           aria-invalid={error ? true : undefined}
           aria-describedby={
             [error ? validMessageId : null, (hint || describedBy) ? hintId : null]

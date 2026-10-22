@@ -17,14 +17,23 @@ import {
 } from "../components/AssessmentSectionFields.tsx";
 import PatientModal from "../components/PatientModal.tsx";
 import PatientSearch from "../components/PatientSearch.tsx";
+import ImportVitalsCsvModal from "../components/ImportVitalsCsvModal.tsx";
+import VitalReadingForm from "../components/VitalReadingForm.tsx";
+import type { VitalReadingPayload } from "../components/VitalReadingForm.tsx";
+import MsIcon from "../components/MsIcon.tsx";
 import { useAuth } from "../context/useAuth.ts";
 import {
+  addVitalObservation,
   createAssessment,
   latestDraftForPatient,
   listPatients,
+  listVitalObservations,
+  riskLevelFromLabel,
   savePrediction,
   updateDraftAssessment,
 } from "../lib/db.ts";
+import { draftToNumericFields, observationError } from "../lib/vitals.ts";
+import type { VitalObservation } from "../lib/vitals.ts";
 import type {
   Assessment,
   AssessmentSections,
@@ -33,25 +42,26 @@ import type {
   NeonatalSection,
 } from "../lib/assessment.ts";
 import type { PredictionResult } from "../lib/ml.ts";
-import { engineConfigured, runPrediction } from "../lib/ml.ts";
-import { formatDateLabel, formatPatientName } from "../lib/patient.ts";
+import { engineConfigured, MlEngineError, runPrediction } from "../lib/ml.ts";
+import { vitalsError, labsError, rangeFieldError } from "../lib/clinicalValidation.ts";
+import ScoringFailureNotice from "../components/ScoringFailureNotice.tsx";
+import { formatDateLabel, formatDateTimeLabel, formatPatientName } from "../lib/patient.ts";
 import type { Patient } from "../lib/patient.ts";
 import { usePageTitle } from "../hooks/usePageTitle.ts";
 import { guide } from "../lib/authErrors.ts";
-import { labsError, vitalsError } from "../lib/clinicalValidation.ts";
 
 type SexChoice = "female" | "male";
 type ModeChoice = "vaginal" | "cesarean";
 type YesNo = boolean | null;
 
 const STEPS = [
-  { short: "Demographic", full: "Demographic & Perinatal" },
-  { short: "Maternal", full: "Maternal Factors" },
-  { short: "Neonatal", full: "Neonatal Clinical Signs" },
-  { short: "Vitals", full: "Physiological (Hourly)" },
-  { short: "Laboratory", full: "Laboratory Results" },
-  { short: "Treatment", full: "Current Treatment" },
-  { short: "Comorbidities", full: "Comorbidities" },
+  { short: "Demographic", full: "Demographic & Perinatal", icon: "child_care" },
+  { short: "Maternal", full: "Maternal Factors", icon: "pregnant_woman" },
+  { short: "Neonatal", full: "Neonatal Clinical Signs", icon: "sick" },
+  { short: "Vitals", full: "Physiological (Hourly)", icon: "monitor_heart" },
+  { short: "Laboratory", full: "Laboratory Results", icon: "science" },
+  { short: "Treatment", full: "Current Treatment", icon: "medication" },
+  { short: "Comorbidities", full: "Comorbidities", icon: "coronavirus" },
 ] as const;
 
 const YES_NO: ReadonlyArray<ChoiceOption<"yes" | "no">> = [
@@ -104,7 +114,9 @@ const EMPTY_SECTIONS: AssessmentSections = {
   },
   neonatal: {
     ageAtAdmissionHours: "",
+    apgarOneMinute: "",
     apgarFiveMinutes: "",
+    apgarTenMinutes: "",
     poorFeeding: false,
     lethargy: false,
     convulsions: false,
@@ -162,7 +174,18 @@ export default function Dashboard() {
   const [patients, setPatients] = useState<Patient[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [engineNotice, setEngineNotice] = useState<string | null>(null);
+  const [engineNotice, setEngineNotice] = useState<{
+    tone: "info" | "success";
+    message: string;
+  } | null>(null);
+  /** Engine outage on the last completed assessment. The wizard resets once
+   * saved, so the scored sections travel with the failure for the retry. */
+  const [scoringFailure, setScoringFailure] = useState<{
+    error: MlEngineError;
+    patientId: string;
+    assessmentId: string;
+    sections: AssessmentSections;
+  } | null>(null);
 
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
   const [saving, setSaving] = useState<AssessmentStatus | null>(null);
@@ -234,6 +257,14 @@ export default function Dashboard() {
   }
 
   function selectPatient(id: string) {
+    if (id !== patientId) {
+      // A new intake context: drop the previous patient's scoring output so
+      // the results panel is never read against the wrong child. It is
+      // replaced by the next completed assessment's score.
+      setResult(null);
+      setScoringFailure(null);
+      setEngineNotice(null);
+    }
     setPatientId(id);
     const patient = patients?.find((p) => p.id === id);
     if (patient != null) {
@@ -248,6 +279,10 @@ export default function Dashboard() {
   }
 
   function patientCreated(patient: Patient) {
+    // Fresh scoring context, same as switching patients in step 1.
+    setResult(null);
+    setScoringFailure(null);
+    setEngineNotice(null);
     setPatients((prev) => [patient, ...(prev ?? [])]);
     setQuickCreateOpen(false);
     setPatientId(patient.id);
@@ -274,6 +309,7 @@ export default function Dashboard() {
     setResumeLoaded(true);
     setStepError(null);
     setEngineNotice(null);
+    setScoringFailure(null);
   }
 
   function goNext() {
@@ -292,8 +328,10 @@ export default function Dashboard() {
   }
 
   async function handleSave(status: AssessmentStatus) {
+    // Drafts stay lenient (types/ranges only); completing enforces required
+    // fields. Either way, jump to the first offending step with its reason.
     for (let index = 0; index < STEPS.length; index += 1) {
-      const error = validateStep(index + 1, patientId, sections);
+      const error = validateStep(index + 1, patientId, sections, status);
       if (error != null) {
         setStep(index + 1);
         setStepError(error);
@@ -320,63 +358,59 @@ export default function Dashboard() {
 
       // Engine scoring happens for completed assessments only (drafts are
       // scored retroactively once the engine batch is wired). A failure here
-      // never loses the saved assessment — the panel explains the fallback.
+      // never loses the saved assessment — the wizard surfaces the warning
+      // notice with a "Retry scoring" action.
       if (status === "complete") {
         if (!engineConfigured()) {
-          setEngineNotice(
-            "Saved. The prediction engine is not configured for this build, so the record will be scored retroactively once scoring is deployed.",
-          );
+          setEngineNotice({
+            tone: "info",
+            message:
+              "The prediction engine is not configured for this build, so the record was saved without a score and will be scored retroactively once scoring is deployed.",
+          });
         } else if (accessToken != null) {
           setPredicting(true);
           try {
-            const prediction = await runPrediction(sections, accessToken);
-            await savePrediction(assessmentId, patient, prediction);
-            setResult(prediction);
-            setPatients((prev) =>
-              (prev ?? []).map((row) =>
-                row.id === patient
-                  ? {
-                    ...row,
-                    riskLevel:
-                      prediction.riskLabel === "HIGH RISK"
-                        ? "high"
-                        : prediction.riskLabel === "LOW RISK"
-                          ? "low"
-                          : "moderate",
-                  }
-                  : row,
-              ),
-            );
+            await scoreAssessment(patient, assessmentId, sections);
           } catch (error) {
             console.error("[palse] prediction failed", error);
-            setEngineNotice(
-              error instanceof Error
-                ? `Saved without a score: ${error.message} The record will be scored retroactively once the engine is reachable.`
-                : "Saved without a score: the prediction engine could not be reached. The record will be scored retroactively.",
-            );
+            if (error instanceof MlEngineError) {
+              setScoringFailure({
+                error,
+                patientId: patient,
+                assessmentId,
+                sections,
+              });
+            } else {
+              // Non-engine failure (e.g. storing the result) — keep the
+              // neutral fallback copy.
+              setEngineNotice({
+                tone: "info",
+                message:
+                  "Saved without a score: the prediction engine could not be reached. The record will be scored retroactively.",
+              });
+            }
           } finally {
             setPredicting(false);
           }
         } else {
-          setEngineNotice(
-            "Saved. Sign in again to run live scoring — the record will be scored retroactively meanwhile.",
-          );
+          setEngineNotice({
+            tone: "info",
+            message:
+              "Sign in again to run live scoring — the record was saved and will be scored retroactively meanwhile.",
+          });
         }
-      }
-
-      setSaved({
-        name:
-          selectedPatient != null
-            ? formatPatientName(selectedPatient)
-            : "The patient",
-        status,
-        resumed: resume != null && status === "complete",
-      });
-      if (status === "complete") {
-        // The draft row is now a completed assessment — the resume banner
-        // shouldn't offer it again on the next visit.
-        setResume(null);
-        setResumeLoaded(false);
+        // Stay in place on a fresh wizard: the results panel keeps the scored
+        // output until a new patient is selected. resetWizard also clears the
+        // resume banner (the draft row is now a completed assessment).
+        resetWizard();
+      } else {
+        setSaved({
+          name:
+            selectedPatient != null
+              ? formatPatientName(selectedPatient)
+              : "The patient",
+          status,
+        });
       }
     } catch (error) {
       console.error("[palse] assessment save failed", error);
@@ -388,10 +422,9 @@ export default function Dashboard() {
     }
   }
 
-  function startNew() {
-    setSaved(null);
-    setEngineNotice(null);
-    setResult(null);
+  /** Returns the wizard to its default empty state without touching scoring
+   * output — results and notices survive until a new patient is selected. */
+  function resetWizard() {
     setStep(1);
     setPatientId(null);
     setSections(EMPTY_SECTIONS);
@@ -400,12 +433,79 @@ export default function Dashboard() {
     setResumeLoaded(false);
   }
 
+  function startNew() {
+    setSaved(null);
+    setEngineNotice(null);
+    setScoringFailure(null);
+    setResult(null);
+    resetWizard();
+  }
+
+  /** Runs the engine for a saved assessment and stores the result. Throws on
+   * engine failure so callers choose how to surface it (info notice vs the
+   * retryable scoring-failure notice). Takes `sections` explicitly: the
+   * wizard may already be reset when this runs from a retry. */
+  async function scoreAssessment(
+    patientId: string,
+    assessmentId: string,
+    sections: AssessmentSections,
+  ) {
+    if (accessToken == null) return;
+    const prediction = await runPrediction(sections, accessToken);
+    await savePrediction(assessmentId, patientId, prediction);
+    setResult(prediction);
+    setScoringFailure(null);
+    setEngineNotice({
+      tone: "success",
+      message:
+        "Assessment saved — it has been scored by the prediction engine.",
+    });
+    setPatients((prev) =>
+      (prev ?? []).map((row) =>
+        row.id === patientId
+          ? {
+              ...row,
+              riskLevel: riskLevelFromLabel(prediction.riskLabel),
+            }
+          : row,
+      ),
+    );
+  }
+
+  /** Re-runs scoring for the failed assessment straight from the captured
+   * sections (the live wizard is already reset); surfaced by the
+   * "Retry scoring" button on the failure notice. */
+  function retryScoring() {
+    const failure = scoringFailure;
+    if (failure == null || predicting) return;
+    setPredicting(true);
+    scoreAssessment(
+      failure.patientId,
+      failure.assessmentId,
+      failure.sections,
+    )
+      .catch((error) => {
+        console.error("[palse] prediction retry failed", error);
+        if (error instanceof MlEngineError) {
+          setScoringFailure({ ...failure, error });
+        } else {
+          setEngineNotice({
+            tone: "info",
+            message:
+              "Saved without a score: the prediction engine could not be reached. The record will be scored retroactively.",
+          });
+        }
+      })
+      .finally(() => {
+        setPredicting(false);
+      });
+  }
+
   if (saved != null) {
     return (
       <SavedConfirmation
         patientName={saved.name}
         status={saved.status}
-        scored={result != null}
         onNew={startNew}
       />
     );
@@ -444,9 +544,14 @@ export default function Dashboard() {
       ) : null}
 
       {engineNotice ? (
-        <Notice tone={result != null ? "success" : "info"}>
-          {engineNotice}
-        </Notice>
+        <Notice tone={engineNotice.tone}>{engineNotice.message}</Notice>
+      ) : null}
+      {scoringFailure != null ? (
+        <ScoringFailureNotice
+          error={scoringFailure.error}
+          retryPending={predicting}
+          onRetry={retryScoring}
+        />
       ) : null}
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -462,6 +567,13 @@ export default function Dashboard() {
           <Panel
             title={STEPS[step - 1].full}
             kicker={`Step ${step} of ${STEPS.length}`}
+            icon={
+              <MsIcon
+                name={STEPS[step - 1].icon}
+                className="text-[22px] text-theme-maroon"
+                optical={24}
+              />
+            }
           >
             <div className="flex flex-col gap-5">
               {renderStep(step, {
@@ -481,13 +593,15 @@ export default function Dashboard() {
                   <button
                     type="button"
                     onClick={goBack}
-                    className="rounded-lg border border-theme-line px-4 py-2 text-sm font-semibold text-theme-ink transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
+                    className="flex items-center gap-1.5 rounded-lg border border-theme-line px-4 py-2 text-sm font-semibold text-theme-ink transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
                   >
+                    <MsIcon name="arrow_back" className="text-[18px]" optical={20} />
                     Back
                   </button>
                 ) : (
                   <span className="text-xs text-theme-gray">
-                    Sections marked with indicators can be completed later.
+                    Required fields are marked <span className="font-bold text-theme-maroon">*</span> —
+                    everything else can be completed later.
                   </span>
                 )}
 
@@ -498,16 +612,18 @@ export default function Dashboard() {
                         type="button"
                         disabled={saving !== null}
                         onClick={() => void handleSave("draft")}
-                        className="rounded-lg border border-theme-line px-4 py-2 text-sm font-semibold text-theme-ink transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon disabled:opacity-60"
+                        className="flex items-center gap-1.5 rounded-lg border border-theme-line px-4 py-2 text-sm font-semibold text-theme-ink transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon disabled:opacity-60"
                       >
+                        <MsIcon name="draft" className="text-[18px]" optical={20} />
                         Save as draft
                       </button>
                       <PrimaryButton
                         pending={saving === "complete"}
                         onClick={() => void handleSave("complete")}
-                        className="w-auto px-5 flex-1"
+                        className="w-auto px-5 flex-1 [&>.ms]:text-[18px]"
                         type="button"
                       >
+                        <MsIcon name="calculate" optical={20} />
                         {resume != null
                           ? "Calculate risk score (finish draft)"
                           : "Complete assessment"}
@@ -517,9 +633,10 @@ export default function Dashboard() {
                     <PrimaryButton
                       type="button"
                       onClick={goNext}
-                      className="w-auto px-5"
+                      className="w-auto px-5 [&>.ms]:text-[18px]"
                     >
                       Next
+                      <MsIcon name="arrow_forward" optical={20} />
                     </PrimaryButton>
                   )}
                 </div>
@@ -609,6 +726,9 @@ function DemographicStep({
       <div className="flex flex-col gap-1.5 md:col-span-2">
         <label htmlFor="patient" className="text-sm font-medium text-theme-ink">
           Patient
+          <span aria-hidden className="ml-1 font-bold text-theme-maroon" title="Required">
+            *
+          </span>
         </label>
         <PatientSearch
           patients={patients}
@@ -655,7 +775,12 @@ function DemographicStep({
       ) : null}
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-theme-ink">Sex</span>
+        <span className="text-sm font-medium text-theme-ink">
+          Sex
+          <span aria-hidden className="ml-1 font-bold text-theme-maroon" title="Required">
+            *
+          </span>
+        </span>
         <ChoiceGroup<SexChoice>
           options={SEX_OPTIONS}
           value={demographic.sex}
@@ -679,11 +804,19 @@ function DemographicStep({
       <FormInput
         id="gestational-age"
         label="Gestational age (weeks)"
+        required
+        hint="Completed weeks of gestation — prefilled from the patient record."
         placeholder="e.g. 38"
         type="number"
+        inputMode="numeric"
         min={20}
         max={45}
         value={demographic.gestationalAgeWeeks}
+        error={liveRangeError(demographic.gestationalAgeWeeks, {
+          label: "Gestational age",
+          min: 20,
+          max: 45,
+        })}
         onChange={(event) =>
           patch("demographic", { gestationalAgeWeeks: event.target.value })
         }
@@ -692,11 +825,19 @@ function DemographicStep({
       <FormInput
         id="birth-weight"
         label="Birth weight (grams)"
+        required
+        hint="Grams at delivery — prefilled from the patient record."
         placeholder="e.g. 3200"
         type="number"
+        inputMode="numeric"
         min={200}
         max={8000}
         value={demographic.birthWeightGrams}
+        error={liveRangeError(demographic.birthWeightGrams, {
+          label: "Birth weight",
+          min: 200,
+          max: 8000,
+        })}
         onChange={(event) =>
           patch("demographic", { birthWeightGrams: event.target.value })
         }
@@ -730,9 +871,15 @@ function MaternalStep({
         label="Maternal age"
         placeholder="e.g. 29"
         type="number"
+        inputMode="numeric"
         min={10}
         max={70}
         value={maternal.maternalAge}
+        error={liveRangeError(maternal.maternalAge, {
+          label: "Maternal age",
+          min: 10,
+          max: 70,
+        })}
         onChange={(event) =>
           patch("maternal", { maternalAge: event.target.value })
         }
@@ -815,27 +962,73 @@ function NeonatalStep({
       <div className="grid gap-5 md:grid-cols-2">
         <FormInput
           id="age-hours"
-          label="Age (h)"
+          label="Age at admission (hours)"
+          required
+          hint="Hours since birth when first admitted — required by the model."
           placeholder="e.g. 12"
           type="number"
+          inputMode="numeric"
           min={0}
+          max={720}
           value={neonatal.ageAtAdmissionHours}
+          error={liveRangeError(neonatal.ageAtAdmissionHours, {
+            label: "Age at admission",
+            min: 0,
+            max: 720,
+          })}
           onChange={(event) =>
             patch("neonatal", { ageAtAdmissionHours: event.target.value })
           }
         />
-        <FormInput
-          id="apgar-five"
-          label="APGAR (5 min)"
-          placeholder="e.g. 7"
-          type="number"
-          min={0}
-          max={10}
-          value={neonatal.apgarFiveMinutes}
-          onChange={(event) =>
-            patch("neonatal", { apgarFiveMinutes: event.target.value })
-          }
-        />
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-theme-ink">
+            APGAR score (1 / 5 / 10 min)
+          </span>
+          <div className="grid grid-cols-3 gap-3">
+            <FormInput
+              id="apgar-one"
+              label="1 min"
+              placeholder="e.g. 6"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={10}
+              value={neonatal.apgarOneMinute}
+              error={liveRangeError(neonatal.apgarOneMinute, { label: "APGAR (1 min)", min: 0, max: 10 })}
+              onChange={(event) =>
+                patch("neonatal", { apgarOneMinute: event.target.value })
+              }
+            />
+            <FormInput
+              id="apgar-five"
+              label="5 min"
+              placeholder="e.g. 7"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={10}
+              value={neonatal.apgarFiveMinutes}
+              error={liveRangeError(neonatal.apgarFiveMinutes, { label: "APGAR (5 min)", min: 0, max: 10 })}
+              onChange={(event) =>
+                patch("neonatal", { apgarFiveMinutes: event.target.value })
+              }
+            />
+            <FormInput
+              id="apgar-ten"
+              label="10 min"
+              placeholder="e.g. 8"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={10}
+              value={neonatal.apgarTenMinutes}
+              error={liveRangeError(neonatal.apgarTenMinutes, { label: "APGAR (10 min)", min: 0, max: 10 })}
+              onChange={(event) =>
+                patch("neonatal", { apgarTenMinutes: event.target.value })
+              }
+            />
+          </div>
+        </div>
       </div>
       <ChipGroup<SignKey>
         legend="Observed signs"
@@ -850,18 +1043,190 @@ function NeonatalStep({
 /* ------------------------------ Step 4 ---------------------------------- */
 
 function VitalsStep({
+  patientId,
+  resume,
   sections,
   patch,
-}: {
-  sections: AssessmentSections;
-  patch: DashboardSectionProps["patch"];
-}) {
+}: DashboardSectionProps) {
   return (
-    <VitalsFields
-      value={sections.vitals}
-      onChange={(next) => patch("vitals", next)}
-      idPrefix="vitals"
-    />
+    <div className="flex flex-col gap-5">
+      <VitalsFields
+        value={sections.vitals}
+        onChange={(next) => patch("vitals", next)}
+        idPrefix="vitals"
+      />
+      <VitalsHistoryBlock patientId={patientId} assessmentId={resume?.id ?? null} />
+    </div>
+  );
+}
+
+/**
+ * Earlier/later vital readings inside the wizard (step 4). Saves to the
+ * shared `vital_observations` history — /monitor's charts (and their live
+ * realtime pushes) read from it, so a reading recorded here shows up in the
+ * monitor without touching this assessment's vitals snapshot.
+ */
+function VitalsHistoryBlock({
+  patientId,
+  assessmentId,
+}: {
+  patientId: string | null;
+  assessmentId: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [recent, setRecent] = useState<VitalObservation[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [formResetKey, setFormResetKey] = useState(0);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+
+  function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && patientId != null && recent.length === 0) {
+      listVitalObservations(patientId, 3)
+        .then((rows) => setRecent(rows))
+        .catch((loadError: unknown) => {
+          console.error("[palse] wizard readings lookup failed", loadError);
+        });
+    }
+  }
+
+  async function handleSave(payload: VitalReadingPayload) {
+    if (patientId == null) {
+      setFormError("Select a patient in step 1 before recording readings.");
+      return;
+    }
+    const invalid = observationError(payload.draft);
+    if (invalid != null) {
+      setFormError(invalid);
+      return;
+    }
+    const recordedAt = new Date(payload.recordedAt);
+    if (!Number.isFinite(recordedAt.getTime())) {
+      setFormError("The reading time is invalid — use the date/time picker.");
+      return;
+    }
+    setSaving(true);
+    setFormError(null);
+    try {
+      const row = await addVitalObservation({
+        patientId,
+        assessmentId,
+        recordedAt: recordedAt.toISOString(),
+        ...draftToNumericFields(payload.draft),
+      });
+      setRecent((prev) =>
+        sortByRecordedDesc([...prev, row]).slice(0, 3),
+      );
+      setFormResetKey((key) => key + 1);
+      setSavedNotice(`Reading recorded (${formatDateTimeLabel(row.recordedAt)}).`);
+    } catch (recordError) {
+      console.error("[palse] wizard reading record failed", recordError);
+      setFormError(guide(recordError, "Could not record the reading. Try again."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-theme-line bg-theme-light-gray/30 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          className="flex items-center gap-2 rounded-lg text-sm font-bold uppercase tracking-wide text-theme-ink transition-colors hover:text-theme-maroon focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
+        >
+          <span aria-hidden className={`ms transition-transform ${open ? "rotate-90" : ""} text-[16px]`}>
+            chevron_right
+          </span>
+          Earlier / later readings (optional)
+        </button>
+        {open && patientId != null ? (
+          <button
+            type="button"
+            onClick={() => setImportOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-theme-maroon px-3.5 py-1.5 text-xs font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
+          >
+            <MsIcon name="upload_file" className="text-[16px]" optical={20} />
+            Import CSV
+          </button>
+        ) : null}
+      </div>
+
+      <p className="mt-1 text-xs text-theme-gray">
+        Backdated or later readings saved to the observation history — the
+        /monitor charts pull from it live. These readings don&apos;t change the
+        snapshot fields above; manage and delete on the monitor page.
+      </p>
+
+      {open ? (
+        <div className="mt-4 flex flex-col gap-3">
+          {patientId == null ? (
+            <p className="text-sm text-theme-gray">
+              Select a patient in step 1 to record readings for them.
+            </p>
+          ) : (
+            <VitalReadingForm
+              key={`wizard-obs-${formResetKey}`}
+              idPrefix="wizard-obs"
+              saving={saving}
+              error={formError}
+              onSave={(payload) => void handleSave(payload)}
+            />
+          )}
+          {savedNotice && !formError ? (
+            <div className="text-sm font-medium text-theme-ink" role="status">
+              {savedNotice}
+            </div>
+          ) : null}
+
+          {recent.length > 0 ? (
+            <ul className="flex flex-col border-t border-theme-line pt-2 text-xs text-theme-gray">
+              {recent.map((row) => (
+                <li key={row.id} className="py-1 tabular-nums">
+                  {formatDateTimeLabel(row.recordedAt)} — {describeObservation(row)}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {importOpen && patientId != null ? (
+        <ImportVitalsCsvModal
+          patientId={patientId}
+          patientName={null}
+          assessmentId={assessmentId}
+          onClose={() => setImportOpen(false)}
+          onImported={(rows) =>
+            setRecent((prev) =>
+              sortByRecordedDesc([...prev, ...rows]).slice(0, 3),
+            )
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function describeObservation(row: VitalObservation): string {
+  const parts: string[] = [];
+  if (row.heartRateBpm != null) parts.push(`HR ${row.heartRateBpm}`);
+  if (row.temperatureC != null) parts.push(`${row.temperatureC} °C`);
+  if (row.sbpMmHg != null || row.dbpMmHg != null) {
+    parts.push(`${row.sbpMmHg ?? "—"}/${row.dbpMmHg ?? "—"}`);
+  }
+  if (row.oxygenSaturationPct != null) parts.push(`O2 ${row.oxygenSaturationPct}%`);
+  if (row.respiratoryRatePerMin != null) parts.push(`RR ${row.respiratoryRatePerMin}`);
+  return parts.length > 0 ? parts.join(", ") : "no values";
+}
+
+function sortByRecordedDesc(rows: VitalObservation[]): VitalObservation[] {
+  return [...rows].sort(
+    (a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt),
   );
 }
 
@@ -938,7 +1303,12 @@ function StepRail({
                     : "cursor-default border-theme-line bg-white text-theme-gray",
               ].join(" ")}
             >
-              <span aria-hidden>{done ? "✓" : number}</span>
+              <MsIcon
+                name={done ? "check_circle" : entry.icon}
+                fill={done ? 1 : 0}
+                className="text-[16px]"
+                optical={20}
+              />
               {entry.short}
             </button>
           </li>
@@ -1155,12 +1525,10 @@ function ScoredResultsPanel({
 function SavedConfirmation({
   patientName,
   status,
-  scored,
   onNew,
 }: {
   patientName: string;
   status: AssessmentStatus;
-  scored: boolean;
   onNew: () => void;
 }) {
   return (
@@ -1173,10 +1541,9 @@ function SavedConfirmation({
       </h2>
       <p className="mx-auto mt-2 max-w-sm text-sm text-theme-gray">
         {patientName}&apos;s record has been{" "}
-        {status === "draft" ? "stored as a draft" : "recorded"}.
-        {scored
-          ? "It has been scored by the prediction engine."
-          : " It has not been scored yet; it will be scored retroactively once the prediction engine is reachable."}
+        {status === "draft" ? "stored as a draft" : "recorded"}. It has not
+        been scored yet; it will be scored retroactively once the prediction
+        engine is reachable.
       </p>
       <PrimaryButton
         onClick={onNew}
@@ -1191,24 +1558,56 @@ function SavedConfirmation({
 
 /* ---------------------------- Validation -------------------------------- */
 
+/**
+ * Inline variant of rangeFieldError: silent while the field is empty so the
+ * required mark (*) + the step gate carry that burden — a pristine form
+ * shouldn't open plastered with red. Fires the moment a typed value is
+ * non-numeric or out of range.
+ */
+function liveRangeError(
+  raw: string,
+  opts: { label: string; min: number; max: number },
+): string | null {
+  return raw.trim() === "" ? null : rangeFieldError(raw, opts);
+}
+
+/**
+ * Step validation. `"complete"` mode enforces the required fields
+ * (asterisks); `"draft"` mode only checks data types/ranges on whatever is
+ * filled — drafts are allowed to be incomplete by definition.
+ */
 function validateStep(
   step: number,
   patientId: string | null,
   sections: AssessmentSections,
+  mode: "draft" | "complete" = "complete",
 ): string | null {
   switch (step) {
     case 1: {
       if (patientId == null) {
         return "Select or create a patient to continue.";
       }
-      const { gestationalAgeWeeks, birthWeightGrams } = sections.demographic;
-      const ga = gestationalAgeWeeks.trim();
-      const bw = birthWeightGrams.trim();
-      if (ga !== "" && !withinRange(Number(ga), 20, 45)) {
-        return "Gestational age must be a number between 20 and 45 weeks.";
+      const { sex, gestationalAgeWeeks, birthWeightGrams } = sections.demographic;
+      if (mode === "complete" && sex == null) {
+        return "Choose the patient's sex to continue.";
       }
-      if (bw !== "" && !withinRange(Number(bw), 200, 8000)) {
-        return "Birth weight must be a number between 200 and 8000 grams.";
+      const gaError = rangeFieldError(gestationalAgeWeeks, {
+        label: "Gestational age",
+        min: 20,
+        max: 45,
+        required: mode === "complete",
+      });
+      if (gaError != null) {
+        return `${gaError} (20–45 weeks).`;
+      }
+      const bwError = rangeFieldError(birthWeightGrams, {
+        label: "Birth weight",
+        min: 200,
+        max: 8000,
+        required: mode === "complete",
+      });
+      if (bwError != null) {
+        return `${bwError} (200–8000 grams).`;
       }
       return null;
     }
@@ -1229,14 +1628,27 @@ function validateStep(
       return null;
     }
     case 3: {
-      const { ageAtAdmissionHours, apgarFiveMinutes } = sections.neonatal;
-      const age = ageAtAdmissionHours.trim();
-      const apgar = apgarFiveMinutes.trim();
-      if (age !== "" && !withinRange(Number(age), 0, 30 * 24)) {
-        return "Age (h) must be a number of hours between 0 and 720.";
+      const { ageAtAdmissionHours, apgarOneMinute, apgarFiveMinutes, apgarTenMinutes } =
+        sections.neonatal;
+      const ageError = rangeFieldError(ageAtAdmissionHours, {
+        label: "Age at admission",
+        min: 0,
+        max: 30 * 24,
+        required: mode === "complete",
+      });
+      if (ageError != null) {
+        return `${ageError} (hours, 0–720).`;
       }
-      if (apgar !== "" && !withinRange(Number(apgar), 0, 10)) {
-        return "APGAR (5 min) must be a number between 0 and 10.";
+      const scores: ReadonlyArray<readonly [string, string]> = [
+        ["APGAR (1 min)", apgarOneMinute],
+        ["APGAR (5 min)", apgarFiveMinutes],
+        ["APGAR (10 min)", apgarTenMinutes],
+      ];
+      for (const [label, raw] of scores) {
+        const apgarError = rangeFieldError(raw, { label, min: 0, max: 10 });
+        if (apgarError != null) {
+          return `${apgarError} — a score between 0 and 10.`;
+        }
       }
       return null;
     }
@@ -1251,6 +1663,3 @@ function validateStep(
   }
 }
 
-function withinRange(value: number, min: number, max: number): boolean {
-  return Number.isFinite(value) && value >= min && value <= max;
-}

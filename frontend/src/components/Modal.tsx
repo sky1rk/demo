@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 
-import CloseIcon from "../assets/icons/close.svg";
+import MsIcon from "./MsIcon.tsx";
 
 /** Centered dialog with overlay; Escape closes. */
 export default function Modal({
@@ -40,7 +40,7 @@ export default function Modal({
             aria-label="Close dialog"
             className="rounded-md p-1 transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-theme-maroon"
           >
-            <img src={CloseIcon} alt="" className="h-5 w-5" aria-hidden />
+            <MsIcon name="close" className="text-[20px]" optical={20} />
           </button>
         </div>
         {children}
