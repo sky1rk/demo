@@ -181,6 +181,7 @@ create table if not exists public.assessments (
   maternal jsonb not null default '{}'::jsonb,
   neonatal jsonb not null default '{}'::jsonb,
   vitals jsonb not null default '{}'::jsonb,
+  laboratory jsonb not null default '{}'::jsonb,
   treatment jsonb not null default '{}'::jsonb,
   comorbidities jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
@@ -244,6 +245,13 @@ alter table public.assessments
   add column if not exists predicted_at timestamptz;
 
 create index if not exists assessments_predicted_at_idx on public.assessments (predicted_at);
+
+-- The Laboratory wizard step (M2) sends a seventh section column.
+alter table public.assessments
+  add column if not exists laboratory jsonb not null default '{}'::jsonb;
+
+comment on column public.assessments.laboratory is
+  'LabSection JSONB: crp_mg_l / wbc_count / platelet_count (optional; empty = not ordered).';
 
 comment on column public.assessments.prediction is
   'StoredPrediction JSONB: probability, risk_label, decision_threshold, predicted_eos, xgb/tft branch probabilities, tft_source, inference_ms, interpretation, recommended_actions.';
