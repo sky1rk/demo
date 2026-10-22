@@ -8,6 +8,7 @@ import RiskBadge from "../components/RiskBadge.tsx";
 import ScoringFailureNotice from "../components/ScoringFailureNotice.tsx";
 import Sparkline from "../components/Sparkline.tsx";
 import TrendChart from "../components/TrendChart.tsx";
+import MsIcon from "../components/MsIcon.tsx";
 import VitalReadingForm from "../components/VitalReadingForm.tsx";
 import type { VitalReadingPayload } from "../components/VitalReadingForm.tsx";
 import { useAuth } from "../context/useAuth.ts";
@@ -40,6 +41,8 @@ interface MetricConfig {
   key: string;
   label: string;
   unit: string;
+  /** Material Symbols glyph shown in the metric card header. */
+  icon: string;
   pick: (observation: VitalObservation) => number | null;
   fromAssessment: (vitals: VitalsSection) => string;
   min: number;
@@ -51,6 +54,7 @@ const METRICS: ReadonlyArray<MetricConfig> = [
     key: "heart_rate_bpm",
     label: "Heart Rate",
     unit: "bpm",
+    icon: "ecg_heart",
     pick: (observation) => observation.heartRateBpm,
     fromAssessment: (vitals) => vitals.heartRateBpm.trim(),
     min: 40,
@@ -60,6 +64,7 @@ const METRICS: ReadonlyArray<MetricConfig> = [
     key: "temperature_c",
     label: "Temperature",
     unit: "°C",
+    icon: "device_thermostat",
     pick: (observation) => observation.temperatureC,
     fromAssessment: (vitals) => vitals.temperatureC.trim(),
     min: 30,
@@ -69,6 +74,7 @@ const METRICS: ReadonlyArray<MetricConfig> = [
     key: "oxygen_saturation_pct",
     label: "O2 Saturation",
     unit: "%",
+    icon: "spo2",
     pick: (observation) => observation.oxygenSaturationPct,
     fromAssessment: (vitals) => vitals.oxygenSaturationPct.trim(),
     min: 40,
@@ -78,6 +84,7 @@ const METRICS: ReadonlyArray<MetricConfig> = [
     key: "respiratory_rate_per_min",
     label: "Respiratory Rate",
     unit: "/min",
+    icon: "air",
     pick: (observation) => observation.respiratoryRatePerMin,
     fromAssessment: (vitals) => vitals.respiratoryRatePerMin.trim(),
     min: 10,
@@ -483,7 +490,8 @@ export default function MonitorPage() {
           return (
             <TrendChart
               key={metric.key}
-              title={`${metric.label} (${metric.unit})`}
+              title={metric.label}
+              icon={metric.icon}
               unit={metric.unit}
               points={series}
               emptyHint={
@@ -517,16 +525,18 @@ export default function MonitorPage() {
             <button
               type="button"
               onClick={() => setImportOpen(true)}
-              className="rounded-lg border border-theme-maroon px-4 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
+              className="flex items-center gap-1.5 rounded-lg border border-theme-maroon px-4 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
             >
+              <MsIcon name="upload_file" className="text-[18px]" optical={20} />
               Import CSV
             </button>
             <button
               type="button"
               disabled={rescoring || latest == null || observations.length === 0}
               onClick={() => void handleRescore()}
-              className="rounded-lg border border-theme-maroon px-4 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon disabled:opacity-60"
+              className="flex items-center gap-1.5 rounded-lg border border-theme-maroon px-4 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon disabled:opacity-60"
             >
+              <MsIcon name="refresh" className="text-[18px]" optical={20} />
               {rescoring
                 ? "Scoring…"
                 : "Recalculate risk score from latest reading"}
@@ -785,8 +795,9 @@ function VitalsTable({
                   <button
                     type="button"
                     onClick={() => onDelete(row.id)}
-                    className="rounded-lg px-2 py-1 text-xs font-semibold text-theme-gray transition-colors hover:bg-risk-high-bg hover:text-risk-high-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
+                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-theme-gray transition-colors hover:bg-risk-high-bg hover:text-risk-high-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
                   >
+                    <MsIcon name="delete" className="text-[14px]" optical={20} />
                     Delete
                   </button>
                 ) : null}

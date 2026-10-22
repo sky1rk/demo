@@ -5,6 +5,7 @@ export default function Panel({
   title,
   subtitle,
   kicker,
+  icon,
   className,
   children,
 }: {
@@ -12,6 +13,8 @@ export default function Panel({
   subtitle?: string;
   /** Small uppercase label rendered above the title. */
   kicker?: string;
+  /** Icon (e.g. an MsIcon) rendered before the title text. */
+  icon?: ReactNode;
   className?: string;
   children: ReactNode;
 }) {
@@ -26,7 +29,12 @@ export default function Panel({
               {kicker}
             </span>
           ) : null}
-          {title ? <h2 className="text-lg font-bold text-theme-ink">{title}</h2> : null}
+          {title ? (
+            <h2 className="flex items-center gap-2 text-lg font-bold text-theme-ink">
+              {icon}
+              {title}
+            </h2>
+          ) : null}
           {subtitle ? <p className="text-sm text-theme-gray">{subtitle}</p> : null}
         </div>
       ) : null}

@@ -1,4 +1,5 @@
 import type { VitalSeriesPoint } from "../lib/vitals.ts";
+import MsIcon from "./MsIcon.tsx";
 
 /**
  * Full vital-sign trend chart (the legacy monitor's gridline + area + line
@@ -13,16 +14,33 @@ export default function TrendChart({
   unit,
   points,
   emptyHint,
+  icon,
 }: {
   title: string;
   unit: string;
   points: VitalSeriesPoint[];
   emptyHint: string;
+  /** Material Symbols glyph name for the card header (optional). */
+  icon?: string;
 }) {
+  const header = (
+    <h2 className="flex items-center gap-2 text-sm font-bold text-theme-ink">
+      {icon != null ? (
+        <MsIcon
+          name={icon}
+          className="text-[20px] text-theme-maroon"
+          optical={20}
+        />
+      ) : null}
+      {title}
+      <span className="text-xs font-medium text-theme-gray">({unit})</span>
+    </h2>
+  );
+
   if (points.length < 2) {
     return (
       <article className="flex min-h-64 flex-col rounded-xl border border-theme-line bg-white p-5 shadow-sm">
-        <h2 className="text-sm font-bold text-theme-ink">{title}</h2>
+        {header}
         <p className="mt-4 text-xs leading-5 text-theme-gray">{emptyHint}</p>
       </article>
     );
@@ -69,7 +87,7 @@ export default function TrendChart({
 
   return (
     <article className="flex flex-col rounded-xl border border-theme-line bg-white p-5 shadow-sm">
-      <h2 className="text-sm font-bold text-theme-ink">{title}</h2>
+      {header}
       <svg
         viewBox="0 0 560 220"
         className="mt-3 w-full"
