@@ -11,15 +11,31 @@ import PrimaryButton from "../components/PrimaryButton.tsx";
 import RiskBadge from "../components/RiskBadge.tsx";
 import {
   ComorbiditiesChips,
+  LabFields,
   TreatmentChips,
   VitalsFields,
 } from "../components/AssessmentSectionFields.tsx";
-import { vitalsError } from "../lib/clinicalValidation.ts";
+import { labsError, vitalsError } from "../lib/clinicalValidation.ts";
 import { guide } from "../lib/authErrors.ts";
-import { getPatient, listAssessments, updateAssessmentSections, updatePatient } from "../lib/db.ts";
-import type { ClinicalSections } from "../lib/assessment.ts";
-import { EMPTY_TREATMENT, EMPTY_VITALS, EMPTY_COMORBIDITIES } from "../lib/assessment.ts";
-import type { Patient, RiskLevel, Sex } from "../lib/patient.ts";
+import {
+  getPatient,
+  listAssessments,
+  riskLevelFromLabel,
+  savePrediction,
+  setPatientOutcome,
+  updateAssessmentSections,
+  updatePatient,
+} from "../lib/db.ts";
+import { engineConfigured, runPrediction } from "../lib/ml.ts";
+import { useAuth } from "../context/useAuth.ts";
+import type { Assessment, AssessmentSections } from "../lib/assessment.ts";
+import {
+  EMPTY_LABS,
+  EMPTY_TREATMENT,
+  EMPTY_VITALS,
+  EMPTY_COMORBIDITIES,
+} from "../lib/assessment.ts";
+import type { Outcome, Patient, RiskLevel, Sex } from "../lib/patient.ts";
 import { formatDateTimeLabel } from "../lib/patient.ts";
 import { usePageTitle } from "../hooks/usePageTitle.ts";
 
@@ -40,6 +56,12 @@ const RISK_OPTIONS: ReadonlyArray<{ value: RiskLevel; label: string }> = [
   { value: "high", label: "High" },
 ];
 
+const OUTCOME_OPTIONS: ReadonlyArray<{ value: Outcome; label: string }> = [
+  { value: "pending", label: "Pending confirmation" },
+  { value: "confirmed_eos", label: "EOS confirmed" },
+  { value: "ruled_out", label: "Sepsis ruled out" },
+];
+
 interface PatientForm {
   firstName: string;
   lastName: string;
@@ -51,6 +73,7 @@ interface PatientForm {
   deliveryMode: "vaginal" | "cesarean" | null;
   notes: string;
   riskLevel: RiskLevel;
+  outcome: Outcome;
 }
 
 function formFromPatient(patient: Patient): PatientForm {
@@ -65,12 +88,16 @@ function formFromPatient(patient: Patient): PatientForm {
     deliveryMode: patient.deliveryMode,
     notes: patient.notes ?? "",
     riskLevel: patient.riskLevel,
+    outcome: patient.outcome ?? "pending",
   };
 }
 
 export default function EditPatientPage() {
   const { id } = useParams<{ id: string }>();
   usePageTitle("Update patient");
+
+  const { session } = useAuth();
+  const accessToken = session?.access_token ?? null;
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -79,13 +106,14 @@ export default function EditPatientPage() {
     id: string;
     status: "draft" | "complete";
     updatedAt: string;
-    vitals: ClinicalSections["vitals"];
-    treatment: ClinicalSections["treatment"];
-    comorbidities: ClinicalSections["comorbidities"];
+    /** Full assessment row — supplies the sections the edit cards don't show
+     * so the engine can rescore the complete clinical picture. */
+    row: Assessment;
   } | null>(null);
 
   const [form, setForm] = useState<PatientForm | null>(null);
   const [vitals, setVitals] = useState(EMPTY_VITALS);
+  const [labs, setLabs] = useState(EMPTY_LABS);
   const [treatment, setTreatment] = useState(EMPTY_TREATMENT);
   const [comorbidities, setComorbidities] = useState(EMPTY_COMORBIDITIES);
 
@@ -93,6 +121,7 @@ export default function EditPatientPage() {
   const [savePending, setSavePending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedVisible, setSavedVisible] = useState(false);
+  const [rescoreNotice, setRescoreNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -120,17 +149,17 @@ export default function EditPatientPage() {
             id: first.id,
             status: first.status,
             updatedAt: first.updatedAt,
-            vitals: first.vitals,
-            treatment: first.treatment,
-            comorbidities: first.comorbidities,
+            row: first,
           });
           setVitals(first.vitals);
+          setLabs(first.laboratory);
           setTreatment(first.treatment);
           setComorbidities(first.comorbidities);
           setInitial({
             patient: formFromPatient(loadedPatient),
             clinical: JSON.stringify({
               vitals: first.vitals,
+              laboratory: first.laboratory,
               treatment: first.treatment,
               comorbidities: first.comorbidities,
             }),
@@ -160,11 +189,12 @@ export default function EditPatientPage() {
     if (JSON.stringify(form) !== JSON.stringify(initial.patient)) return true;
     if (initial.clinical !== "") {
       return (
-        JSON.stringify({ vitals, treatment, comorbidities }) !== initial.clinical
+        JSON.stringify({ vitals, laboratory: labs, treatment, comorbidities }) !==
+        initial.clinical
       );
     }
     return false;
-  }, [form, initial, vitals, treatment, comorbidities]);
+  }, [form, initial, vitals, labs, treatment, comorbidities]);
 
   const blocker = useBlocker(
     ({ currentLocation, nextLocation }) =>
@@ -216,6 +246,7 @@ export default function EditPatientPage() {
     const formState = form;
     const patientState = patient;
     setSaveError(null);
+    setRescoreNotice(null);
 
     // Re-validate the essentials on save.
     if (formState.firstName.trim() === "" || formState.lastName.trim() === "") {
@@ -237,10 +268,22 @@ export default function EditPatientPage() {
       setSaveError(vitalsValidationError);
       return;
     }
+    const labsValidationError = labsError(labs);
+    if (labsValidationError != null) {
+      setSaveError(labsValidationError);
+      return;
+    }
 
     setSavePending(true);
+    // Engine rescore may override the manual risk level; tracked so the form
+    // and the unsaved-changes baseline stay in sync with the engine result.
+    let nextRisk: RiskLevel | null = null;
     try {
-      const updated = await updatePatient(patientState.id, {
+      const outcomeChanged = patientState.outcome !== formState.outcome;
+      if (outcomeChanged) {
+        await setPatientOutcome(patientState.id, formState.outcome);
+      }
+      const savedPatient = await updatePatient(patientState.id, {
         firstName: formState.firstName.trim(),
         lastName: formState.lastName.trim(),
         sex: formState.sex,
@@ -252,27 +295,74 @@ export default function EditPatientPage() {
         notes: formState.notes.trim() === "" ? null : formState.notes.trim(),
         riskLevel: formState.riskLevel,
       });
-      setPatient(updated);
+      setPatient(
+        outcomeChanged ? { ...savedPatient, outcome: formState.outcome } : savedPatient,
+      );
 
       if (latest != null) {
         const saved = await updateAssessmentSections(latest.id, {
           vitals,
+          laboratory: labs,
           treatment,
           comorbidities,
         });
         setLatest((prev) =>
           prev == null ? null : { ...prev, updatedAt: saved.updatedAt },
         );
+
+        // Rescore with the engine when it's configured: the edited clinical
+        // cards are merged over the latest row's full section set so the
+        // model always sees the complete picture. A scoring failure never
+        // rolls back the saved edits.
+        if (engineConfigured() && accessToken != null) {
+          try {
+            const mergedSections: AssessmentSections = {
+              demographic: latest.row.demographic,
+              maternal: latest.row.maternal,
+              neonatal: latest.row.neonatal,
+              vitals,
+              laboratory: labs,
+              treatment,
+              comorbidities,
+            };
+            const prediction = await runPrediction(mergedSections, accessToken);
+            await savePrediction(latest.id, patientState.id, prediction);
+            // Local const keeps the narrowed RiskLevel usable in callbacks.
+            const rescoredRisk: RiskLevel = riskLevelFromLabel(prediction.riskLabel);
+            nextRisk = rescoredRisk;
+            setPatient(
+              (prev) => (prev == null ? prev : { ...prev, riskLevel: rescoredRisk }),
+            );
+            setRescoreNotice(
+              `Record rescored by the prediction engine — risk level is now “${rescoredRisk}”.`,
+            );
+          } catch (error) {
+            console.error("[palse] edit rescoring failed", error);
+            setRescoreNotice(
+              error instanceof Error
+                ? `Could not rescore: ${error.message} The record will be scored retroactively.`
+                : "Could not rescore: the prediction engine could not be reached. The record will be scored retroactively.",
+            );
+          }
+        }
       }
 
-      const nextForm = formFromPatient(updated);
+      const nextForm = formFromPatient({
+        ...savedPatient,
+        outcome: outcomeChanged ? formState.outcome : savedPatient.outcome,
+        riskLevel: nextRisk ?? savedPatient.riskLevel,
+      });
       setInitial({
         patient: nextForm,
         clinical:
           latest == null
             ? ""
-            : JSON.stringify({ vitals, treatment, comorbidities }),
+            : JSON.stringify({ vitals, laboratory: labs, treatment, comorbidities }),
       });
+      if (nextRisk != null) {
+        const engineRisk = nextRisk; // narrow once for the state callback
+        setForm((prev) => (prev == null ? prev : { ...prev, riskLevel: engineRisk }));
+      }
       setSavedVisible(true);
       window.setTimeout(() => setSavedVisible(false), 4000);
     } catch (error) {
@@ -318,6 +408,11 @@ export default function EditPatientPage() {
           Changes saved{latest != null ? " — including the latest assessment" : ""}.
         </Notice>
       ) : null}
+      {rescoreNotice != null && !saveError ? (
+        <Notice tone={rescoreNotice.startsWith("Record rescored") ? "success" : "danger"}>
+          {rescoreNotice}
+        </Notice>
+      ) : null}
       {dirty ? (
         <Notice tone="info">
           You have unsaved changes. Use “Save changes” to keep them.
@@ -349,7 +444,7 @@ export default function EditPatientPage() {
             <label htmlFor="edit-risk" className="text-sm font-medium text-theme-ink">
               Risk level{" "}
               <span className="text-xs font-normal text-theme-gray">
-                (manual until the engine is live)
+                (set automatically by the prediction engine)
               </span>
             </label>
             <select
@@ -359,6 +454,27 @@ export default function EditPatientPage() {
               className="w-full rounded-lg border border-theme-line bg-white px-3.5 py-2 text-sm text-theme-ink transition-colors focus:border-theme-maroon focus:outline-none focus:ring-2 focus:ring-theme-maroon/25"
             >
               {RISK_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="edit-outcome" className="text-sm font-medium text-theme-ink">
+              Outcome{" "}
+              <span className="text-xs font-normal text-theme-gray">
+                (confirmation of what actually happened)
+              </span>
+            </label>
+            <select
+              id="edit-outcome"
+              value={form.outcome}
+              onChange={(event) => patchForm({ outcome: event.target.value as Outcome })}
+              className="w-full rounded-lg border border-theme-line bg-white px-3.5 py-2 text-sm text-theme-ink transition-colors focus:border-theme-maroon focus:outline-none focus:ring-2 focus:ring-theme-maroon/25"
+            >
+              {OUTCOME_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -436,6 +552,14 @@ export default function EditPatientPage() {
             <VitalsFields
               value={vitals}
               onChange={(next) => setVitals((prev) => ({ ...prev, ...next }))}
+              idPrefix="edit"
+            />
+          </Panel>
+
+          <Panel title="Laboratory Results">
+            <LabFields
+              value={labs}
+              onChange={(next) => setLabs((prev) => ({ ...prev, ...next }))}
               idPrefix="edit"
             />
           </Panel>

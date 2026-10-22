@@ -1,6 +1,9 @@
 export type Sex = "female" | "male" | null;
 export type RiskLevel = "pending" | "low" | "moderate" | "high";
 
+/** Retroactive sepsis confirmation used by reports accuracy stats. */
+export type Outcome = "pending" | "confirmed_eos" | "ruled_out";
+
 /** Shape of `public.patients` rows as exposed to the app. */
 export interface Patient {
   id: string;
@@ -15,6 +18,7 @@ export interface Patient {
   birthWeightGrams: number | null;
   deliveryMode: "vaginal" | "cesarean" | null;
   riskLevel: RiskLevel;
+  outcome: Outcome;
   notes: string | null;
   createdAt: string;
   updatedAt: string;

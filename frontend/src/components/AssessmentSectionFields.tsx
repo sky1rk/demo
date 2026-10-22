@@ -2,6 +2,7 @@ import ChipGroup from "./ChipGroup.tsx";
 import FormInput from "./FormInput.tsx";
 import type {
   ComorbiditiesSection,
+  LabSection,
   TreatmentSection,
   VitalsSection,
 } from "../lib/assessment.ts";
@@ -87,6 +88,61 @@ export function VitalsFields({
       />
       <p id={`${idPrefix}-bp-format`} className="self-end text-xs text-theme-gray">
         Blood pressure as systolic/diastolic, e.g. 74/44.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Laboratory fields, shared by the assessment wizard and the patient-edit
+ * page. Leaving a field empty means "not ordered" — the prediction engine
+ * imputes accordingly. `idPrefix` keeps DOM ids unique when several forms
+ * mount on the same page.
+ */
+export function LabFields({
+  value,
+  onChange,
+  idPrefix,
+}: {
+  value: LabSection;
+  onChange: (patch: Partial<LabSection>) => void;
+  idPrefix: string;
+}) {
+  return (
+    <div className="grid gap-5 md:grid-cols-2">
+      <FormInput
+        id={`${idPrefix}-crp`}
+        label="CRP (mg/L)"
+        placeholder="e.g. 18"
+        type="number"
+        min={0}
+        max={500}
+        value={value.crpMgL}
+        onChange={(event) => onChange({ crpMgL: event.target.value })}
+      />
+      <FormInput
+        id={`${idPrefix}-wbc`}
+        label="WBC count (/µL)"
+        placeholder="e.g. 14500"
+        type="number"
+        min={0}
+        max={100000}
+        value={value.wbcCount}
+        onChange={(event) => onChange({ wbcCount: event.target.value })}
+      />
+      <FormInput
+        id={`${idPrefix}-platelets`}
+        label="Platelets (/µL)"
+        placeholder="e.g. 210000"
+        type="number"
+        min={0}
+        max={1000000}
+        value={value.plateletCount}
+        onChange={(event) => onChange({ plateletCount: event.target.value })}
+      />
+      <p className="self-end text-xs text-theme-gray">
+        Leave a field empty if the test was not ordered — the engine treats
+        unmeasured labs as "not ordered" instead of a normal result.
       </p>
     </div>
   );

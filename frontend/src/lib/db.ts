@@ -3,14 +3,16 @@ import {
   type AssessmentSections,
   type AssessmentStatus,
   type ClinicalSections,
+  type StoredPrediction,
 } from "./assessment.ts";
-import { type Patient, type RiskLevel, type Sex } from "./patient.ts";
+import type { PredictionResult } from "./ml.ts";
+import { type Outcome, type Patient, type RiskLevel, type Sex } from "./patient.ts";
 import { supabase } from "./supabase.ts";
 
 /**
- * Direct Supabase data access for the clinical app. These functions are the
- * seam for the future backend (Render + prediction engine) — the UI never
- * touches the supabase client outside of here.
+ * Direct Supabase data access for the clinical app. The EOS inference service
+ * (`lib/ml.ts`) computes scores; everything else — auth, storage, ownership —
+ * lives here and nowhere else.
  */
 
 type PatientsRow = {
@@ -25,6 +27,7 @@ type PatientsRow = {
   birth_weight_grams: number | null;
   delivery_mode: string | null;
   risk_level: string;
+  outcome: string;
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -43,6 +46,7 @@ function toPatient(row: PatientsRow): Patient {
     birthWeightGrams: row.birth_weight_grams,
     deliveryMode: (row.delivery_mode as Patient["deliveryMode"]) ?? null,
     riskLevel: row.risk_level as RiskLevel,
+    outcome: (row.outcome ?? "pending") as Outcome,
     notes: row.notes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -170,11 +174,63 @@ type AssessmentRow = {
   maternal: AssessmentSections["maternal"];
   neonatal: AssessmentSections["neonatal"];
   vitals: AssessmentSections["vitals"];
+  laboratory: AssessmentSections["laboratory"];
   treatment: AssessmentSections["treatment"];
   comorbidities: AssessmentSections["comorbidities"];
+  prediction: StoredPrediction | null;
+  predicted_at: string | null;
   created_at: string;
   updated_at: string;
 };
+
+function fromPredictionResult(result: PredictionResult): StoredPrediction {
+  return {
+    probability: result.probability,
+    risk_label: result.riskLabel,
+    decision_threshold: result.threshold,
+    predicted_eos: result.predictedEos,
+    xgb_eos_probability: result.xgbEosProbability,
+    tft_eos_probability: result.tftEosProbability,
+    tft_source: result.tftSource,
+    inference_ms: result.inferenceMs,
+    interpretation: result.interpretation,
+    recommended_actions: result.recommendedActions,
+  };
+}
+
+function toPredictionResult(stored: StoredPrediction): PredictionResult {
+  return {
+    probability: stored.probability,
+    probabilityPercent: stored.probability * 100,
+    riskLabel:
+      stored.risk_label === "HIGH RISK"
+        ? "HIGH RISK"
+        : stored.risk_label === "LOW RISK"
+          ? "LOW RISK"
+          : "MODERATE RISK",
+    resultTitle:
+      stored.predicted_eos
+        ? "Sepsis Risk Detected"
+        : stored.risk_label === "MODERATE RISK"
+          ? "Monitor Closely"
+          : "Low EOS Risk",
+    predictedEos: stored.predicted_eos,
+    threshold: stored.decision_threshold,
+    xgbEosProbability: stored.xgb_eos_probability,
+    tftEosProbability: stored.tft_eos_probability,
+    tftSource: stored.tft_source,
+    interpretation: stored.interpretation,
+    recommendedActions: stored.recommended_actions,
+    inferenceMs: stored.inference_ms,
+  };
+}
+
+/** Engine outcome surfaced with an assessment (null when never scored). */
+export function assessmentPrediction(assessment: Assessment): PredictionResult | null {
+  return assessment.prediction == null
+    ? null
+    : toPredictionResult(assessment.prediction);
+}
 
 function toAssessment(row: AssessmentRow): Assessment {
   return {
@@ -186,8 +242,11 @@ function toAssessment(row: AssessmentRow): Assessment {
     maternal: row.maternal,
     neonatal: row.neonatal,
     vitals: row.vitals,
+    laboratory: row.laboratory,
     treatment: row.treatment,
     comorbidities: row.comorbidities,
+    prediction: row.prediction,
+    predictedAt: row.predicted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -245,6 +304,7 @@ export async function createAssessment(input: NewAssessmentInput): Promise<strin
       maternal: input.sections.maternal,
       neonatal: input.sections.neonatal,
       vitals: input.sections.vitals,
+      laboratory: input.sections.laboratory,
       treatment: input.sections.treatment,
       comorbidities: input.sections.comorbidities,
     })
@@ -253,4 +313,63 @@ export async function createAssessment(input: NewAssessmentInput): Promise<strin
 
   if (error != null) throw error;
   return (data as { id: string }).id;
+}
+
+/**
+ * Persists an engine score on the assessment row (prediction JSONB +
+ * denormalized columns) and updates the patient's registry risk level so
+ * /patients pills reflect the engine instead of manual entry. Returns the
+ * updated patient when the risk sync succeeds; a failure to sync the patient
+ * never rolls back the stored prediction (legacy behavior: prediction rows
+ * are immutable once recorded).
+ */
+export async function savePrediction(
+  assessmentId: string,
+  patientId: string,
+  result: PredictionResult,
+): Promise<void> {
+  const { error } = await supabase
+    .from("assessments")
+    .update({
+      prediction: fromPredictionResult(result),
+      predicted_at: new Date().toISOString(),
+    })
+    .eq("id", assessmentId);
+
+  if (error != null) throw error;
+
+  await updatePatientRiskLevel(patientId, result);
+}
+
+/** Maps a legacy risk label onto the registry's low/moderate/high enum. */
+export function riskLevelFromLabel(label: string): Exclude<RiskLevel, "pending"> {
+  return label === "HIGH RISK" ? "high" : label === "LOW RISK" ? "low" : "moderate";
+}
+
+async function updatePatientRiskLevel(
+  patientId: string,
+  result: PredictionResult,
+): Promise<void> {
+  const { error } = await supabase
+    .from("patients")
+    .update({ risk_level: riskLevelFromLabel(result.riskLabel) })
+    .eq("id", patientId);
+
+  if (error != null) throw error;
+}
+
+/* ------------------------------ Outcomes -------------------------------- */
+
+/**
+ * Records a retroactive clinical outcome on the patient. Confirmed outcomes
+ * are what make the Reports "Accuracy" card computable (engine prediction vs.
+ * confirmed baseline), mirroring the legacy stack's per-user prediction/report
+ * ownership with a team-scoped twist.
+ */
+export async function setPatientOutcome(
+  patientId: string,
+  outcome: Outcome,
+): Promise<void> {
+  const { error } = await supabase.from("patients").update({ outcome }).eq("id", patientId);
+  if (error != null) throw error;
 }

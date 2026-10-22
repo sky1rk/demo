@@ -122,7 +122,7 @@ create table if not exists public.patients (
 );
 
 comment on table public.patients is
-  'Neonatal patient registry. risk_level is manual until the prediction engine is connected.';
+  'Neonatal patient registry. risk_level is set automatically by engine scoring (with manual fallback); outcome records the retroactive clinical confirmation.';
 
 create index if not exists patients_created_by_idx on public.patients (created_by);
 create index if not exists patients_risk_level_idx on public.patients (risk_level);
@@ -188,10 +188,11 @@ create table if not exists public.assessments (
 );
 
 comment on table public.assessments is
-  'Wizard intake data per patient. Risk scoring happens in the (future) prediction engine, not here.';
+  'Wizard intake data per patient. Scored by the EOS inference service (ml-service); results land in the prediction column.';
 
 create index if not exists assessments_patient_id_idx on public.assessments (patient_id);
 create index if not exists assessments_created_by_idx on public.assessments (created_by);
+create index if not exists assessments_predicted_at_idx on public.assessments (predicted_at);
 
 alter table public.assessments enable row level security;
 
@@ -230,3 +231,32 @@ create trigger assessments_touch_updated_at
   on public.assessments
   for each row
   execute function extensions.moddatetime(updated_at);
+
+-- ---------------------------------------------------------------------------
+-- 6. Engine scoring (schema v3)
+--    The EOS inference service returns the legacy build_prediction contract;
+--    the frontend persists the full box on the assessment (prediction) plus
+--    denormalized columns for querying. patients.outcome records the
+--    retroactive clinical confirmation that makes accuracy stats computable.
+--    All statements are idempotent — safe to re-run after upgrading.
+-- ---------------------------------------------------------------------------
+alter table public.assessments
+  add column if not exists prediction jsonb,
+  add column if not exists predicted_at timestamptz;
+
+comment on column public.assessments.prediction is
+  'StoredPrediction JSONB: probability, risk_label, decision_threshold, predicted_eos, xgb/tft branch probabilities, tft_source, inference_ms, interpretation, recommended_actions.';
+comment on column public.assessments.predicted_at is
+  'When the inference service scored this assessment (null = unscored/draft).';
+
+-- patients.outcome: engine-scoring is a prediction, not a diagnosis. The
+-- clinician records what actually happened so Reports can compute accuracy.
+alter table public.patients
+  add column if not exists outcome text
+    default 'pending'
+    constraint patients_outcome_values check (outcome in ('pending', 'confirmed_eos', 'ruled_out'));
+
+comment on column public.patients.outcome is
+  'Retroactive clinical confirmation (pending until recorded). Accuracy on /reports agrees confirmed_eos with predicted_eos.';
+
+create index if not exists patients_outcome_idx on public.patients (outcome);

@@ -1,0 +1,15 @@
+# EOS inference service (Render web service, rootDir ml-service).
+# scikit-learn/xgboost are pinned to the era of the saved artifacts — newer
+# sklearn cannot unpickle the imputers. torch/pytorch-forecasting are
+# intentionally absent: predict_tft() uses the vital-sign heuristic fallback
+# unless the optional live-TFT runtime + training CSV are provided.
+fastapi
+uvicorn[standard]
+pydantic
+pyjwt[crypto]>=2.8
+numpy
+pandas
+scipy
+joblib
+scikit-learn==1.5.2
+xgboost==2.1.4

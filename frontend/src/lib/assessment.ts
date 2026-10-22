@@ -42,13 +42,20 @@ export interface VitalsSection {
   respiratoryRatePerMin: string;
 }
 
-/** Section 5 — Current Treatment (toggle chips). */
+/** Section 5 — Laboratory. Optional values; an empty field means "not ordered". */
+export interface LabSection {
+  crpMgL: string;
+  wbcCount: string;
+  plateletCount: string;
+}
+
+/** Section 6 — Current Treatment (toggle chips). */
 export type TreatmentSection = Record<
   "centralVenousLine" | "umbilicalArterialLine" | "inotrope" | "intubated",
   boolean
 >;
 
-/** Section 6 — Comorbidities (toggle chips). */
+/** Section 7 — Comorbidities (toggle chips). */
 export type ComorbiditiesSection = Record<
   | "necrotizingEnterocolitis"
   | "nonCardiacSurgicalDisease"
@@ -64,6 +71,7 @@ export interface AssessmentSections {
   maternal: MaternalSection;
   neonatal: NeonatalSection;
   vitals: VitalsSection;
+  laboratory: LabSection;
   treatment: TreatmentSection;
   comorbidities: ComorbiditiesSection;
 }
@@ -78,15 +86,19 @@ export interface Assessment {
   maternal: MaternalSection;
   neonatal: NeonatalSection;
   vitals: VitalsSection;
+  laboratory: LabSection;
   treatment: TreatmentSection;
   comorbidities: ComorbiditiesSection;
+  /** Engine score; null when the assessment has never been scored. */
+  prediction: StoredPrediction | null;
+  predictedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export type ClinicalSections = Pick<
   AssessmentSections,
-  "vitals" | "treatment" | "comorbidities"
+  "vitals" | "laboratory" | "treatment" | "comorbidities"
 >;
 
 export const EMPTY_VITALS: VitalsSection = {
@@ -96,6 +108,31 @@ export const EMPTY_VITALS: VitalsSection = {
   oxygenSaturationPct: "",
   respiratoryRatePerMin: "",
 };
+
+export const EMPTY_LABS: LabSection = {
+  crpMgL: "",
+  wbcCount: "",
+  plateletCount: "",
+};
+
+/**
+ * Prediction block persisted on the assessment row after the inference
+ * service responds (`supabase/schema.sql` v3: `assessments.prediction` +
+ * `predicted_at`). `risk_label` denormalizes the box for the registry; the
+ * full legacy contract stays intact for reports.
+ */
+export interface StoredPrediction {
+  probability: number;
+  risk_label: string;
+  decision_threshold: number;
+  predicted_eos: boolean;
+  xgb_eos_probability: number;
+  tft_eos_probability: number;
+  tft_source: string;
+  inference_ms: number;
+  interpretation: string;
+  recommended_actions: string[];
+}
 
 export const EMPTY_TREATMENT: TreatmentSection = {
   centralVenousLine: false,
