@@ -276,3 +276,16 @@ grant all privileges on all sequences in schema public to anon, authenticated;
 
 alter default privileges in schema public grant all on tables    to anon, authenticated;
 alter default privileges in schema public grant all on sequences to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 8. Ownership defaults (schema v5)
+--    The frontend never sends created_by — the server supplies it from the
+--    JWT. This is spoof-proof (client can't claim another user's rows) and
+--    satisfies the same-value RLS checks on insert. Idempotent re-runs are
+--    no-ops (set default is not conditional but converges to the same state).
+-- ---------------------------------------------------------------------------
+alter table public.patients
+  alter column created_by set default auth.uid();
+
+alter table public.assessments
+  alter column created_by set default auth.uid();
