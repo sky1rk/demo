@@ -316,6 +316,62 @@ export async function createAssessment(input: NewAssessmentInput): Promise<strin
 }
 
 /**
+ * The patient's open draft assessment, so the wizard can resume and complete
+ * it in place instead of stacking duplicates. Scoped to the current user —
+ * completing a draft is an UPDATE and its RLS policy allows the creator only.
+ */
+export async function latestDraftForPatient(
+  patientId: string,
+): Promise<Assessment | null> {
+  const { data: session } = await supabase.auth.getSession();
+  const userId = session.session?.user.id;
+  if (userId == null) return null;
+
+  const { data, error } = await supabase
+    .from("assessments")
+    .select("*")
+    .eq("patient_id", patientId)
+    .eq("status", "draft")
+    .eq("created_by", userId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error != null) throw error;
+  const row = (data as AssessmentRow[] | null)?.[0];
+  return row == null ? null : toAssessment(row);
+}
+
+/**
+ * Re-saves an existing draft row (all seven sections) and flips its status
+ * when the wizard completes it. Keeps one record per intake instead of
+ * publishing a second assessment halfway through.
+ */
+export async function updateDraftAssessment(
+  assessmentId: string,
+  sections: AssessmentSections,
+  status: AssessmentStatus,
+): Promise<Assessment> {
+  const { data, error } = await supabase
+    .from("assessments")
+    .update({
+      status,
+      demographic: sections.demographic,
+      maternal: sections.maternal,
+      neonatal: sections.neonatal,
+      vitals: sections.vitals,
+      laboratory: sections.laboratory,
+      treatment: sections.treatment,
+      comorbidities: sections.comorbidities,
+    })
+    .eq("id", assessmentId)
+    .select("*")
+    .single();
+
+  if (error != null) throw error;
+  return toAssessment(data as AssessmentRow);
+}
+
+/**
  * Persists an engine score on the assessment row (prediction JSONB +
  * denormalized columns) and updates the patient's registry risk level so
  * /patients pills reflect the engine instead of manual entry. Returns the
