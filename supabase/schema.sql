@@ -261,3 +261,18 @@ comment on column public.patients.outcome is
   'Retroactive clinical confirmation (pending until recorded). Accuracy on /reports agrees confirmed_eos with predicted_eos.';
 
 create index if not exists patients_outcome_idx on public.patients (outcome);
+
+-- ---------------------------------------------------------------------------
+-- 7. Privileges (schema v4)
+--    RLS decides WHICH rows each query sees; these grants decide whether the
+--    API roles may touch the schema at all. Some projects lose the default
+--    grants Supabase normally attaches to the SQL-editor role — queries then
+--    fail with 42501 "permission denied for table <t>". This block restores
+--    them and pins future tables the same way. Idempotent.
+-- ---------------------------------------------------------------------------
+grant usage on schema public to anon, authenticated;
+grant all privileges on all tables    in schema public to anon, authenticated;
+grant all privileges on all sequences in schema public to anon, authenticated;
+
+alter default privileges in schema public grant all on tables    to anon, authenticated;
+alter default privileges in schema public grant all on sequences to anon, authenticated;
