@@ -36,7 +36,7 @@ export interface NewVitalObservation {
   respiratoryRatePerMin: number | null;
 }
 
-interface ObservationDraft {
+export interface ObservationDraft {
   heartRateBpm: string;
   temperatureC: string;
   sbpMmHg: string;
@@ -108,6 +108,14 @@ function nullableNumber(raw: string): number | null {
   const text = raw.trim();
   if (text === "") return null;
   return Number.isFinite(Number(text)) ? Number(text) : null;
+}
+
+/** React datetime-local input string for the given moment, local time. */
+export function toLocalInput(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}`;
 }
 
 export type VitalSeriesPoint = { t: number; v: number };

@@ -3,11 +3,13 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import Notice from "../components/Notice.tsx";
 import Panel from "../components/Panel.tsx";
-import FormInput from "../components/FormInput.tsx";
-import PrimaryButton from "../components/PrimaryButton.tsx";
+import ImportVitalsCsvModal from "../components/ImportVitalsCsvModal.tsx";
 import RiskBadge from "../components/RiskBadge.tsx";
+import ScoringFailureNotice from "../components/ScoringFailureNotice.tsx";
 import Sparkline from "../components/Sparkline.tsx";
 import TrendChart from "../components/TrendChart.tsx";
+import VitalReadingForm from "../components/VitalReadingForm.tsx";
+import type { VitalReadingPayload } from "../components/VitalReadingForm.tsx";
 import { useAuth } from "../context/useAuth.ts";
 import {
   addVitalObservation,
@@ -20,16 +22,11 @@ import {
   savePrediction,
   updateAssessmentSections,
 } from "../lib/db.ts";
-import {
-  EMPTY_OBSERVATION_DRAFT,
-  draftToNumericFields,
-  observationError,
-  observationSeries,
-} from "../lib/vitals.ts";
+import { draftToNumericFields, observationError, observationSeries } from "../lib/vitals.ts";
 import type { VitalObservation } from "../lib/vitals.ts";
 import type { Assessment, AssessmentSections, VitalsSection } from "../lib/assessment.ts";
 import type { PredictionResult } from "../lib/ml.ts";
-import { engineConfigured, getAccessToken, runPrediction } from "../lib/ml.ts";
+import { engineConfigured, getAccessToken, MlEngineError, runPrediction } from "../lib/ml.ts";
 import type { Patient } from "../lib/patient.ts";
 import { formatPatientName, formatDateTimeLabel } from "../lib/patient.ts";
 import { usePageTitle } from "../hooks/usePageTitle.ts";
@@ -103,13 +100,21 @@ export default function MonitorPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [draft, setDraft] = useState(EMPTY_OBSERVATION_DRAFT);
-  const [draftRecordedAt, setDraftRecordedAt] = useState<string>(() => toLocalInput(new Date()));
   const [saving, setSaving] = useState(false);
+  /** Bumped after saves / patient switches so the shared form clears. */
+  const [formResetKey, setFormResetKey] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [rescoring, setRescoring] = useState(false);
-  const [rescoreNotice, setRescoreNotice] = useState<string | null>(null);
+  const [rescoreNotice, setRescoreNotice] = useState<{
+    tone: "success" | "info";
+    message: string;
+  } | null>(null);
+  /** Engine outage on the last rescoring attempt; retryable via the notice. */
+  const [scoringFailure, setScoringFailure] = useState<MlEngineError | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
@@ -221,20 +226,19 @@ export default function MonitorPage() {
     setSavedNotice(null);
     setRescoreNotice(null);
     setFormError(null);
-    setDraft(EMPTY_OBSERVATION_DRAFT);
-    setDraftRecordedAt(toLocalInput(new Date()));
+    setFormResetKey((key) => key + 1);
     setSearchParams(id === "" ? {} : { patient: id }, { replace: true });
   }
 
-  async function handleRecordReading() {
+  async function handleRecordReading(payload: VitalReadingPayload) {
     const patientId = selectedId;
     if (patientId == null) return;
-    const invalid = observationError(draft);
+    const invalid = observationError(payload.draft);
     if (invalid != null) {
       setFormError(invalid);
       return;
     }
-    const recordedAt = new Date(draftRecordedAt);
+    const recordedAt = new Date(payload.recordedAt);
     if (!Number.isFinite(recordedAt.getTime())) {
       setFormError("The reading time is invalid — use the date/time picker.");
       return;
@@ -246,11 +250,10 @@ export default function MonitorPage() {
         patientId,
         assessmentId: assessments[0]?.id ?? null,
         recordedAt: recordedAt.toISOString(),
-        ...draftToNumericFields(draft),
+        ...draftToNumericFields(payload.draft),
       });
       setObservations((prev) => sortByRecordedDesc([...prev, row]));
-      setDraft(EMPTY_OBSERVATION_DRAFT);
-      setDraftRecordedAt(toLocalInput(new Date()));
+      setFormResetKey((key) => key + 1);
       setSavedNotice(`Reading recorded (${formatDateTimeLabel(row.recordedAt)}).`);
     } catch (recordError) {
       console.error("[palse] observation record failed", recordError);
@@ -277,9 +280,11 @@ export default function MonitorPage() {
     if (latest == null || patientId == null) return;
 
     if (!engineConfigured()) {
-      setRescoreNotice(
-        "The prediction engine is not configured for this build — the reading was saved on the observation history only.",
-      );
+      setRescoreNotice({
+        tone: "info",
+        message:
+          "The prediction engine is not configured for this build — the reading was saved on the observation history only.",
+      });
       return;
     }
     let accessToken: string | null = null;
@@ -289,7 +294,10 @@ export default function MonitorPage() {
       accessToken = null;
     }
     if (accessToken == null) {
-      setRescoreNotice("Your session expired. Sign in again to run scoring.");
+      setRescoreNotice({
+        tone: "info",
+        message: "Your session expired. Sign in again to run scoring.",
+      });
       return;
     }
 
@@ -320,16 +328,23 @@ export default function MonitorPage() {
         };
         return next;
       });
-      setRescoreNotice(
-        `Scored ${formatDateTimeLabel(observation?.recordedAt ?? latest.updatedAt)}: risk level is now “${rescoredRisk}”.`,
-      );
+      setRescoreNotice({
+        tone: "success",
+        message: `Scored ${formatDateTimeLabel(observation?.recordedAt ?? latest.updatedAt)}: risk level is now “${rescoredRisk}”.`,
+      });
+      setScoringFailure(null);
     } catch (scoreError) {
       console.error("[palse] monitor rescoring failed", scoreError);
-      setRescoreNotice(
-        scoreError instanceof Error
-          ? `Could not rescore: ${scoreError.message} The record will be scored retroactively.`
-          : "Could not rescore: the prediction engine could not be reached.",
-      );
+      if (scoreError instanceof MlEngineError) {
+        setScoringFailure(scoreError);
+      } else {
+        // Non-engine failure (e.g. saving the sections) — neutral copy.
+        setRescoreNotice({
+          tone: "info",
+          message:
+            "Could not rescore: the prediction engine could not be reached. The record will be scored retroactively.",
+        });
+      }
     } finally {
       setRescoring(false);
     }
@@ -484,102 +499,14 @@ export default function MonitorPage() {
       {/* Record + manage readings */}
       {selected != null ? (
         <Panel className="flex-col gap-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-bold uppercase tracking-wide text-theme-ink">
-                Record vitals
-              </h2>
-              <p className="text-xs text-theme-gray">
-                Adds to the observation history — backdate earlier readings with
-                the time control. Charts update live.
-              </p>
-            </div>
-            <div className="flex items-end gap-3">
-              <label htmlFor="obs-recorded-at" className="text-xs font-medium text-theme-gray">
-                Reading time
-              </label>
-              <input
-                id="obs-recorded-at"
-                type="datetime-local"
-                value={draftRecordedAt}
-                onChange={(event) => setDraftRecordedAt(event.target.value)}
-                className="rounded-lg border border-theme-line bg-white px-3 py-2 text-sm text-theme-ink focus:border-theme-maroon focus:outline-none focus:ring-2 focus:ring-theme-maroon/25"
-              />
-            </div>
-          </div>
+          <VitalReadingForm
+            key={`monitor-obs-${formResetKey}`}
+            idPrefix="monitor-obs"
+            saving={saving}
+            error={formError}
+            onSave={(payload) => void handleRecordReading(payload)}
+          />
 
-          <div className="grid gap-4 md:grid-cols-3">
-            <FormInput
-              id="obs-hr"
-              label="HR (bpm)"
-              placeholder="e.g. 148"
-              type="number"
-              min={0}
-              value={draft.heartRateBpm}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, heartRateBpm: event.target.value }))
-              }
-            />
-            <FormInput
-              id="obs-temp"
-              label="Temp (°C)"
-              placeholder="e.g. 38.2"
-              type="number"
-              min={20}
-              step="0.1"
-              value={draft.temperatureC}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, temperatureC: event.target.value }))
-              }
-            />
-            <FormInput
-              id="obs-o2"
-              label="O2 Sat (%)"
-              placeholder="e.g. 94"
-              type="number"
-              min={40}
-              max={100}
-              value={draft.oxygenSaturationPct}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, oxygenSaturationPct: event.target.value }))
-              }
-            />
-            <FormInput
-              id="obs-sbp"
-              label="SBP (mmHg)"
-              placeholder="e.g. 78"
-              type="number"
-              min={0}
-              value={draft.sbpMmHg}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, sbpMmHg: event.target.value }))
-              }
-            />
-            <FormInput
-              id="obs-dbp"
-              label="DBP (mmHg)"
-              placeholder="e.g. 44"
-              type="number"
-              min={0}
-              value={draft.dbpMmHg}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, dbpMmHg: event.target.value }))
-              }
-            />
-            <FormInput
-              id="obs-rr"
-              label="Resp Rate (/min)"
-              placeholder="e.g. 52"
-              type="number"
-              min={0}
-              value={draft.respiratoryRatePerMin}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, respiratoryRatePerMin: event.target.value }))
-              }
-            />
-          </div>
-
-          {formError ? <div className="text-sm font-medium text-risk-high-fg">{formError}</div> : null}
           {savedNotice && !formError ? (
             <div className="text-sm font-medium text-theme-ink" role="status">
               {savedNotice}
@@ -587,13 +514,13 @@ export default function MonitorPage() {
           ) : null}
 
           <div className="flex flex-wrap items-center gap-3 border-t border-theme-line pt-4">
-            <PrimaryButton
-              pending={saving}
-              onClick={() => void handleRecordReading()}
+            <button
               type="button"
+              onClick={() => setImportOpen(true)}
+              className="rounded-lg border border-theme-maroon px-4 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
             >
-              Save reading
-            </PrimaryButton>
+              Import CSV
+            </button>
             <button
               type="button"
               disabled={rescoring || latest == null || observations.length === 0}
@@ -609,7 +536,16 @@ export default function MonitorPage() {
             </span>
           </div>
 
-          {rescoreNotice ? <Notice tone="info">{rescoreNotice}</Notice> : null}
+          {rescoreNotice ? (
+            <Notice tone={rescoreNotice.tone}>{rescoreNotice.message}</Notice>
+          ) : null}
+          {scoringFailure != null ? (
+            <ScoringFailureNotice
+              error={scoringFailure}
+              retryPending={rescoring}
+              onRetry={() => void handleRescore()}
+            />
+          ) : null}
 
           <VitalsTable
             observations={observations.slice(0, TABLE_LIMIT)}
@@ -617,6 +553,19 @@ export default function MonitorPage() {
             onDelete={(id) => void handleDelete(id)}
           />
         </Panel>
+      ) : null}
+
+      {/* CSV import (same batch format as vitals-import-example.csv) */}
+      {importOpen && selected != null ? (
+        <ImportVitalsCsvModal
+          patientId={selected.id}
+          patientName={formatPatientName(selected)}
+          assessmentId={assessments[0]?.id ?? null}
+          onClose={() => setImportOpen(false)}
+          onImported={(rows) =>
+            setObservations((prev) => sortByRecordedDesc([...prev, ...rows]))
+          }
+        />
       ) : null}
 
       {/* Prediction history */}
@@ -664,15 +613,6 @@ export default function MonitorPage() {
 }
 
 /* ------------------------------- Helpers --------------------------------- */
-
-/* -------------------------------- Helpers -------------------------------- */
-
-function toLocalInput(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`;
-}
 
 function sortByRecordedDesc(rows: VitalObservation[]): VitalObservation[] {
   return [...rows].sort(

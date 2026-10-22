@@ -527,6 +527,35 @@ export async function addVitalObservation(
   return toVitalObservation(data as VitalObservationRow);
 }
 
+/**
+ * CSV-import path: one multi-row insert for a validated batch (the importer
+ * pre-validates rows and caps the batch size, so server-side failures here
+ * mean policy/permission problems, not data problems).
+ */
+export async function addVitalObservations(
+  rows: NewVitalObservation[],
+): Promise<VitalObservation[]> {
+  const { data, error } = await supabase
+    .from("vital_observations")
+    .insert(
+      rows.map((input) => ({
+        patient_id: input.patientId,
+        assessment_id: input.assessmentId ?? null,
+        recorded_at: input.recordedAt,
+        heart_rate_bpm: input.heartRateBpm,
+        temperature_c: input.temperatureC,
+        sbp_mmhg: input.sbpMmHg,
+        dbp_mmhg: input.dbpMmHg,
+        oxygen_saturation_pct: input.oxygenSaturationPct,
+        respiratory_rate_per_min: input.respiratoryRatePerMin,
+      })),
+    )
+    .select("*");
+
+  if (error != null) throw error;
+  return ((data ?? []) as VitalObservationRow[]).map(toVitalObservation);
+}
+
 /** Not offered for other users' rows — the delete policy only allows creators. */
 export async function deleteVitalObservation(id: string): Promise<void> {
   const { error } = await supabase.from("vital_observations").delete().eq("id", id);
