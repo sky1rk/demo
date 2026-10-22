@@ -39,14 +39,20 @@ export function AppMobileNav() {
   );
 }
 
-const TOPBAR_LABELS: Array<{ match: (path: string) => boolean; label: string }> = [
-  { match: (p) => p.startsWith("/dashboard"), label: "Assessment" },
-  { match: (p) => p.startsWith("/patients"), label: "Patient Registry" },
-  { match: (p) => p.startsWith("/reports"), label: "Reports & Analytics" },
-];
+const TOPBAR_LABELS: Array<{
+  match: (path: string) => boolean;
+  label: string;
+}> = [
+    { match: (p) => p.startsWith("/dashboard"), label: "Assessment" },
+    { match: (p) => p.startsWith("/patients"), label: "Patient Registry" },
+    { match: (p) => p.startsWith("/reports"), label: "Reports & Analytics" },
+  ];
 
 function titleForPath(path: string): string {
-  return TOPBAR_LABELS.find((entry) => entry.match(path))?.label ?? "Clinical Console";
+  return (
+    TOPBAR_LABELS.find((entry) => entry.match(path))?.label ??
+    "Clinical Console"
+  );
 }
 
 function initialsOf(firstName: string | null, lastName: string | null): string {
@@ -60,20 +66,30 @@ const Topbar: ComponentType = function Topbar() {
   const { profile, user, session } = useAuth();
   const location = useLocation();
 
-  const firstName = profile?.first_name ?? (user?.user_metadata?.first_name as string | undefined) ?? "";
-  const lastName = profile?.last_name ?? (user?.user_metadata?.last_name as string | undefined) ?? "";
-  const display = `${firstName} ${lastName}`.trim() || session?.user.email || "Clinician";
+  const firstName =
+    profile?.first_name ??
+    (user?.user_metadata?.first_name as string | undefined) ??
+    "";
+  const lastName =
+    profile?.last_name ??
+    (user?.user_metadata?.last_name as string | undefined) ??
+    "";
+  const display =
+    `${firstName} ${lastName}`.trim() || session?.user.email || "Clinician";
 
   return (
     <header className="sticky top-0 z-10 border-b border-theme-line bg-theme-white px-5 py-3 md:px-8">
-      <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4">
+      <div className="mx-auto flex w-full max-w-[68em] items-center justify-between gap-4">
         <div className="flex items-baseline gap-3">
-          <Link to="/dashboard" className="text-sm font-semibold text-theme-ink">
+          <Link
+            to="/dashboard"
+            className="text-sm font-semibold text-theme-ink"
+          >
             {titleForPath(location.pathname)}
           </Link>
-          <span className="hidden text-xs text-theme-gray sm:inline">
-            Neonatal Sepsis Prediction
-          </span>
+          {/* <span className="hidden text-xs text-theme-gray sm:inline"> */}
+          {/*   • Neonatal Sepsis Prediction */}
+          {/* </span> */}
         </div>
 
         <Link
@@ -81,7 +97,9 @@ const Topbar: ComponentType = function Topbar() {
           className="flex items-center gap-3 rounded-lg px-2 py-1.5 transition-colors hover:bg-theme-light-gray focus-visible:outline-2 focus-visible:outline-theme-maroon"
         >
           <div className="hidden text-right sm:block">
-            <div className="text-sm font-semibold text-theme-ink">{display}</div>
+            <div className="text-sm font-semibold text-theme-ink">
+              {display}
+            </div>
             <div className="text-xs text-theme-gray">
               {profile?.role || profile?.department || "Clinical team"}
             </div>

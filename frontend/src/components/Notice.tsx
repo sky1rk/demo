@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
 
-export type NoticeTone = "info" | "success" | "danger";
+export type NoticeTone = "info" | "success" | "warning" | "danger";
 
 const TONES = {
   info: "border-sky-200 bg-sky-50 text-sky-900",
   success: "border-risk-low-fg/30 bg-risk-low-bg text-risk-low-fg",
+  warning: "border-amber-300 bg-amber-50 text-amber-900",
   danger: "border-risk-high-fg/25 bg-risk-high-bg text-risk-high-fg",
 } as const;
 

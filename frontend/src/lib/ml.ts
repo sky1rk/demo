@@ -20,6 +20,34 @@ import { supabase } from "./supabase.ts";
 
 export type RiskLabel = "LOW RISK" | "MODERATE RISK" | "HIGH RISK";
 
+/** Why a scoring attempt failed; lets the UI react without string matching.
+ *
+ * - `not_configured` — this build has no VITE_ML_API_URL (not an outage).
+ * - `unreachable`    — the fetch itself failed (engine down OR local network).
+ * - `timeout`        — no response inside the request window (often a Render
+ *                      free-tier cold start, not a hard outage).
+ * - `auth`           — 401 from the engine (expired session or engine
+ *                      misconfiguration; the engine's detail is preserved).
+ * - `server`         — any other non-OK engine response.
+ */
+export type MlEngineErrorKind =
+  | "not_configured"
+  | "unreachable"
+  | "timeout"
+  | "auth"
+  | "server";
+
+/** Thrown by runPrediction. */
+export class MlEngineError extends Error {
+  readonly kind: MlEngineErrorKind;
+
+  constructor(kind: MlEngineErrorKind, message: string) {
+    super(message);
+    this.name = "MlEngineError";
+    this.kind = kind;
+  }
+}
+
 /** POST /predict response — the legacy build_prediction contract. */
 export interface PredictionResult {
   probability: number;
@@ -136,7 +164,10 @@ export async function runPrediction(
   accessToken: string,
 ): Promise<PredictionResult> {
   if (!engineConfigured()) {
-    throw new Error("Prediction engine is not configured for this build.");
+    throw new MlEngineError(
+      "not_configured",
+      "The prediction engine is not configured for this build.",
+    );
   }
 
   const payload = sectionsToMlPayload(sections);
@@ -156,11 +187,15 @@ export async function runPrediction(
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(
-        "The prediction engine took too long to respond. Please try again.",
+      throw new MlEngineError(
+        "timeout",
+        "The prediction engine did not respond in time — it may be starting up. Try again in a minute.",
       );
     }
-    throw new Error(
+    // The browser can't tell an engine outage from a local network problem,
+    // so the copy stays neutral ("could not be reached").
+    throw new MlEngineError(
+      "unreachable",
       "Could not reach the prediction engine. Check your connection and try again.",
     );
   } finally {
@@ -183,7 +218,8 @@ export async function runPrediction(
       body != null && typeof body === "object" && "detail" in body
         ? String((body as { detail: unknown }).detail)
         : null;
-    throw new Error(
+    throw new MlEngineError(
+      "auth",
       detail ?? "Your session expired. Please sign in again to run scoring.",
     );
   }
@@ -192,9 +228,11 @@ export async function runPrediction(
       body != null && typeof body === "object" && "detail" in body
         ? String((body as { detail: unknown }).detail)
         : null;
-    throw new Error(
-      detail ??
-        `The prediction engine returned an error (${response.status}). Please review the clinical values and try again.`,
+    throw new MlEngineError(
+      "server",
+      detail
+        ? `The prediction engine returned an error (${response.status}): ${detail}`
+        : `The prediction engine returned an error (${response.status}).`,
     );
   }
 

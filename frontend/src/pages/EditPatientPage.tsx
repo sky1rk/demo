@@ -9,6 +9,7 @@ import Notice from "../components/Notice.tsx";
 import Panel from "../components/Panel.tsx";
 import PrimaryButton from "../components/PrimaryButton.tsx";
 import RiskBadge from "../components/RiskBadge.tsx";
+import ScoringFailureNotice from "../components/ScoringFailureNotice.tsx";
 import {
   ComorbiditiesChips,
   LabFields,
@@ -26,7 +27,7 @@ import {
   updateAssessmentSections,
   updatePatient,
 } from "../lib/db.ts";
-import { engineConfigured, runPrediction } from "../lib/ml.ts";
+import { engineConfigured, MlEngineError, runPrediction } from "../lib/ml.ts";
 import { useAuth } from "../context/useAuth.ts";
 import type { Assessment, AssessmentSections } from "../lib/assessment.ts";
 import {
@@ -122,6 +123,10 @@ export default function EditPatientPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedVisible, setSavedVisible] = useState(false);
   const [rescoreNotice, setRescoreNotice] = useState<string | null>(null);
+  /** Engine outage on the last rescoring attempt; retryable via the notice. */
+  const [scoringFailure, setScoringFailure] = useState<MlEngineError | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
@@ -247,6 +252,7 @@ export default function EditPatientPage() {
     const patientState = patient;
     setSaveError(null);
     setRescoreNotice(null);
+    setScoringFailure(null);
 
     // Re-validate the essentials on save.
     if (formState.firstName.trim() === "" || formState.lastName.trim() === "") {
@@ -313,36 +319,26 @@ export default function EditPatientPage() {
         // Rescore with the engine when it's configured: the edited clinical
         // cards are merged over the latest row's full section set so the
         // model always sees the complete picture. A scoring failure never
-        // rolls back the saved edits.
+        // rolls back the saved edits — it surfaces in the retryable notice.
         if (engineConfigured() && accessToken != null) {
           try {
-            const mergedSections: AssessmentSections = {
-              demographic: latest.row.demographic,
-              maternal: latest.row.maternal,
-              neonatal: latest.row.neonatal,
-              vitals,
-              laboratory: labs,
-              treatment,
-              comorbidities,
-            };
-            const prediction = await runPrediction(mergedSections, accessToken);
-            await savePrediction(latest.id, patientState.id, prediction);
-            // Local const keeps the narrowed RiskLevel usable in callbacks.
-            const rescoredRisk: RiskLevel = riskLevelFromLabel(prediction.riskLabel);
-            nextRisk = rescoredRisk;
-            setPatient(
-              (prev) => (prev == null ? prev : { ...prev, riskLevel: rescoredRisk }),
+            const rescoredRisk = await rescoreLatest(
+              patientState.id,
+              latest.id,
             );
-            setRescoreNotice(
-              `Record rescored by the prediction engine — risk level is now “${rescoredRisk}”.`,
-            );
+            if (rescoredRisk != null) {
+              nextRisk = rescoredRisk;
+            }
           } catch (error) {
             console.error("[palse] edit rescoring failed", error);
-            setRescoreNotice(
-              error instanceof Error
-                ? `Could not rescore: ${error.message} The record will be scored retroactively.`
-                : "Could not rescore: the prediction engine could not be reached. The record will be scored retroactively.",
-            );
+            if (error instanceof MlEngineError) {
+              setScoringFailure(error);
+            } else {
+              // Non-engine failure (e.g. storing the result) — neutral copy.
+              setRescoreNotice(
+                "Could not rescore: the prediction engine could not be reached. The record will be scored retroactively.",
+              );
+            }
           }
         }
       }
@@ -371,6 +367,61 @@ export default function EditPatientPage() {
     } finally {
       setSavePending(false);
     }
+  }
+
+  /** Re-runs the engine over the latest assessment with the unsaved clinical
+   * edits merged in, and stores the prediction. Throws MlEngineError on
+   * engine failure so callers surface the retryable notice. */
+  async function rescoreLatest(
+    patientId: string,
+    assessmentId: string,
+  ): Promise<RiskLevel | null> {
+    if (latest == null || accessToken == null) return null;
+    const mergedSections: AssessmentSections = {
+      demographic: latest.row.demographic,
+      maternal: latest.row.maternal,
+      neonatal: latest.row.neonatal,
+      vitals,
+      laboratory: labs,
+      treatment,
+      comorbidities,
+    };
+    const prediction = await runPrediction(mergedSections, accessToken);
+    await savePrediction(assessmentId, patientId, prediction);
+    const rescoredRisk = riskLevelFromLabel(prediction.riskLabel);
+    setPatient((prev) =>
+      prev == null ? prev : { ...prev, riskLevel: rescoredRisk },
+    );
+    setRescoreNotice(
+      `Record rescored by the prediction engine — risk level is now “${rescoredRisk}”.`,
+    );
+    setScoringFailure(null);
+    return rescoredRisk;
+  }
+
+  /** Re-runs the failed rescoring straight from the current clinical cards;
+   * surfaced by the "Retry scoring" button on the failure notice. */
+  function retryRescore() {
+    if (savePending || latest == null || patient == null || accessToken == null) {
+      return;
+    }
+    // Capture the narrowed values so the callback has non-nullable locals.
+    const patientState = patient;
+    setSavePending(true);
+    rescoreLatest(patientState.id, latest.id)
+      .catch((error) => {
+        console.error("[palse] edit rescoring retry failed", error);
+        if (error instanceof MlEngineError) {
+          setScoringFailure(error);
+        } else {
+          setRescoreNotice(
+            "Could not rescore: the prediction engine could not be reached. The record will be scored retroactively.",
+          );
+        }
+      })
+      .finally(() => {
+        setSavePending(false);
+      });
   }
 
   function patchForm(update: Partial<PatientForm>) {
@@ -409,9 +460,14 @@ export default function EditPatientPage() {
         </Notice>
       ) : null}
       {rescoreNotice != null && !saveError ? (
-        <Notice tone={rescoreNotice.startsWith("Record rescored") ? "success" : "danger"}>
-          {rescoreNotice}
-        </Notice>
+        <Notice tone="success">{rescoreNotice}</Notice>
+      ) : null}
+      {scoringFailure != null && !saveError ? (
+        <ScoringFailureNotice
+          error={scoringFailure}
+          retryPending={savePending}
+          onRetry={() => retryRescore()}
+        />
       ) : null}
       {dirty ? (
         <Notice tone="info">
