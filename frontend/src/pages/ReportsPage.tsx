@@ -3,7 +3,9 @@ import { Link } from "react-router-dom";
 
 import Notice from "../components/Notice.tsx";
 import Panel from "../components/Panel.tsx";
-import { listAllAssessments, listPatients } from "../lib/db.ts";
+import RiskBadge from "../components/RiskBadge.tsx";
+import { assessmentPrediction, listAllAssessments, listPatients, riskLevelFromLabel } from "../lib/db.ts";
+import type { PredictionResult } from "../lib/ml.ts";
 import { guide } from "../lib/authErrors.ts";
 import {
   buildReportHtml,
@@ -79,14 +81,20 @@ export default function ReportsPage() {
   }, [patients]);
 
   const recent = useMemo((): ReportEntry[] => {
-    return (assessments ?? []).slice(0, 8).map((assessment) => ({
-      id: assessment.id,
-      patientName: patientById.get(assessment.patientId) != null
-        ? formatPatientName(patientById.get(assessment.patientId) as Patient)
-        : "—",
-      status: assessment.status,
-      createdAt: assessment.createdAt,
-    }));
+    return (assessments ?? []).slice(0, 8).map((assessment) => {
+      const prediction: PredictionResult | null = assessmentPrediction(assessment);
+      return {
+        id: assessment.id,
+        patientName: patientById.get(assessment.patientId) != null
+          ? formatPatientName(patientById.get(assessment.patientId) as Patient)
+          : "—",
+        status: assessment.status,
+        createdAt: assessment.createdAt,
+        riskLabel: prediction?.riskLabel ?? null,
+        probability: prediction?.probability ?? null,
+        inferenceMs: prediction?.inferenceMs ?? null,
+      };
+    });
   }, [assessments, patientById]);
 
   const maxTier = Math.max(1, ...Object.values(stats.distribution));
@@ -160,31 +168,49 @@ export default function ReportsPage() {
             <StatCard
               label="Total assessments"
               value={String(stats.totalAssessments)}
-              sub={`${stats.completed} completed · ${stats.drafts} draft${stats.drafts === 1 ? "" : "s"}`}
+              sub={`${stats.completed} completed · ${stats.drafts} draft${stats.drafts === 1 ? "" : "s"} · ${stats.totalScored} engine-scored`}
             />
             <StatCard
               label="High-risk cases"
               value={String(stats.highRiskPatients)}
-              sub="Manually set risk levels"
+              sub={`${stats.scoredHighRisk} engine-scored HIGH RISK`}
               accent="bg-risk-high-fg"
             />
-            <StatCard
-              label="Accuracy rate"
-              value="—"
-              sub="Pending prediction engine"
-              muted
-            />
-            <StatCard
-              label="Avg response time"
-              value="—"
-              sub="Pending prediction engine"
-              muted
-            />
+            {stats.accuracyPercent != null ? (
+              <StatCard
+                label="Accuracy rate"
+                value={`${stats.accuracyPercent}%`}
+                sub={`${stats.confirmedScored} confirmed outcome${stats.confirmedScored === 1 ? "" : "s"}`}
+                accent="bg-risk-low-fg"
+              />
+            ) : (
+              <StatCard
+                label="Accuracy rate"
+                value="—"
+                sub="Pending confirmed outcomes"
+                muted
+              />
+            )}
+            {stats.avgResponseMs != null ? (
+              <StatCard
+                label="Avg response time"
+                value={`${Math.round(stats.avgResponseMs) >= 1000 ? `${(stats.avgResponseMs / 1000).toFixed(1)} s` : `${Math.round(stats.avgResponseMs)} ms`}`}
+                sub="Engine inference latency"
+                accent="bg-risk-moderate-fg"
+              />
+            ) : (
+              <StatCard
+                label="Avg response time"
+                value="—"
+                sub="Pending engine scores"
+                muted
+              />
+            )}
           </div>
 
           <Panel
             title="Risk distribution"
-            subtitle="Where the registry's patients currently sit, as set manually on patient records."
+            subtitle="Where the registry's patients currently sit, as scored by the prediction engine."
           >
             <RiskDistribution distribution={stats.distribution} maxTier={maxTier} />
           </Panel>
@@ -214,6 +240,7 @@ export default function ReportsPage() {
                         <th className="px-4 py-2.5">Assessment</th>
                         <th className="px-4 py-2.5">Patient</th>
                         <th className="px-4 py-2.5">Status</th>
+                        <th className="px-4 py-2.5">Engine result</th>
                         <th className="px-4 py-2.5">Created</th>
                         <th className="px-4 py-2.5"></th>
                       </tr>
@@ -232,6 +259,20 @@ export default function ReportsPage() {
                           </td>
                           <td className="px-4 py-2.5">
                             <StatusChip status={entry.status} />
+                          </td>
+                          <td className="px-4 py-2.5">
+                            {entry.riskLabel != null ? (
+                              <span className="flex items-center gap-2">
+                                <RiskBadge level={riskLevelFromLabel(entry.riskLabel)} />
+                                {entry.probability != null ? (
+                                  <span className="text-xs text-theme-gray tabular-nums">
+                                    {(entry.probability * 100).toFixed(1)}%
+                                  </span>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-theme-placeholder">not scored</span>
+                            )}
                           </td>
                           <td className="px-4 py-2.5 text-theme-gray">
                             {formatDateLabel(entry.createdAt)}
@@ -269,6 +310,20 @@ export default function ReportsPage() {
                         <span className="font-mono">{entry.id.slice(0, 8)}…</span>
                         {" · "}
                         {formatDateLabel(entry.createdAt)}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        {entry.riskLabel != null ? (
+                          <>
+                            <RiskBadge level={riskLevelFromLabel(entry.riskLabel)} />
+                            {entry.probability != null ? (
+                              <span className="text-xs text-theme-gray tabular-nums">
+                                {(entry.probability * 100).toFixed(1)}%
+                              </span>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="text-xs text-theme-placeholder">Not scored</span>
+                        )}
                       </div>
                     </li>
                   ))}

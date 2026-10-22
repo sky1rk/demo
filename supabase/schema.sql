@@ -122,7 +122,7 @@ create table if not exists public.patients (
 );
 
 comment on table public.patients is
-  'Neonatal patient registry. risk_level is manual until the prediction engine is connected.';
+  'Neonatal patient registry. risk_level is set automatically by engine scoring (with manual fallback); outcome records the retroactive clinical confirmation.';
 
 create index if not exists patients_created_by_idx on public.patients (created_by);
 create index if not exists patients_risk_level_idx on public.patients (risk_level);
@@ -181,6 +181,7 @@ create table if not exists public.assessments (
   maternal jsonb not null default '{}'::jsonb,
   neonatal jsonb not null default '{}'::jsonb,
   vitals jsonb not null default '{}'::jsonb,
+  laboratory jsonb not null default '{}'::jsonb,
   treatment jsonb not null default '{}'::jsonb,
   comorbidities jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
@@ -188,7 +189,7 @@ create table if not exists public.assessments (
 );
 
 comment on table public.assessments is
-  'Wizard intake data per patient. Risk scoring happens in the (future) prediction engine, not here.';
+  'Wizard intake data per patient. Scored by the EOS inference service (service/); results land in the prediction column.';
 
 create index if not exists assessments_patient_id_idx on public.assessments (patient_id);
 create index if not exists assessments_created_by_idx on public.assessments (created_by);
@@ -230,3 +231,69 @@ create trigger assessments_touch_updated_at
   on public.assessments
   for each row
   execute function extensions.moddatetime(updated_at);
+
+-- ---------------------------------------------------------------------------
+-- 6. Engine scoring (schema v3)
+--    The EOS inference service returns the legacy build_prediction contract;
+--    the frontend persists the full box on the assessment (prediction) plus
+--    denormalized columns for querying. patients.outcome records the
+--    retroactive clinical confirmation that makes accuracy stats computable.
+--    All statements are idempotent — safe to re-run after upgrading.
+-- ---------------------------------------------------------------------------
+alter table public.assessments
+  add column if not exists prediction jsonb,
+  add column if not exists predicted_at timestamptz;
+
+create index if not exists assessments_predicted_at_idx on public.assessments (predicted_at);
+
+-- The Laboratory wizard step (M2) sends a seventh section column.
+alter table public.assessments
+  add column if not exists laboratory jsonb not null default '{}'::jsonb;
+
+comment on column public.assessments.laboratory is
+  'LabSection JSONB: crp_mg_l / wbc_count / platelet_count (optional; empty = not ordered).';
+
+comment on column public.assessments.prediction is
+  'StoredPrediction JSONB: probability, risk_label, decision_threshold, predicted_eos, xgb/tft branch probabilities, tft_source, inference_ms, interpretation, recommended_actions.';
+comment on column public.assessments.predicted_at is
+  'When the inference service scored this assessment (null = unscored/draft).';
+
+-- patients.outcome: engine-scoring is a prediction, not a diagnosis. The
+-- clinician records what actually happened so Reports can compute accuracy.
+alter table public.patients
+  add column if not exists outcome text
+    default 'pending'
+    constraint patients_outcome_values check (outcome in ('pending', 'confirmed_eos', 'ruled_out'));
+
+comment on column public.patients.outcome is
+  'Retroactive clinical confirmation (pending until recorded). Accuracy on /reports agrees confirmed_eos with predicted_eos.';
+
+create index if not exists patients_outcome_idx on public.patients (outcome);
+
+-- ---------------------------------------------------------------------------
+-- 7. Privileges (schema v4)
+--    RLS decides WHICH rows each query sees; these grants decide whether the
+--    API roles may touch the schema at all. Some projects lose the default
+--    grants Supabase normally attaches to the SQL-editor role — queries then
+--    fail with 42501 "permission denied for table <t>". This block restores
+--    them and pins future tables the same way. Idempotent.
+-- ---------------------------------------------------------------------------
+grant usage on schema public to anon, authenticated;
+grant all privileges on all tables    in schema public to anon, authenticated;
+grant all privileges on all sequences in schema public to anon, authenticated;
+
+alter default privileges in schema public grant all on tables    to anon, authenticated;
+alter default privileges in schema public grant all on sequences to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 8. Ownership defaults (schema v5)
+--    The frontend never sends created_by — the server supplies it from the
+--    JWT. This is spoof-proof (client can't claim another user's rows) and
+--    satisfies the same-value RLS checks on insert. Idempotent re-runs are
+--    no-ops (set default is not conditional but converges to the same state).
+-- ---------------------------------------------------------------------------
+alter table public.patients
+  alter column created_by set default auth.uid();
+
+alter table public.assessments
+  alter column created_by set default auth.uid();

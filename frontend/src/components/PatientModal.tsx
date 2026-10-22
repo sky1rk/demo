@@ -27,8 +27,9 @@ function withinRange(value: number, min: number, max: number): boolean {
 
 /**
  * Register-new-patient dialog, shared by the dashboard wizard (compact set)
- * and the registry's Add Patient (full set with MRN, DOB, delivery mode and
- * notes). Creates a real `patients` row.
+ * and the registry's Add Patient (full set with DOB, delivery mode and
+ * notes). Both modes capture the MRN; the rest is registry-only. Creates a
+ * real `patients` row.
  */
 export default function PatientModal({
   mode,
@@ -81,7 +82,7 @@ export default function PatientModal({
           sex,
           gestationalAgeWeeks: ga === "" ? null : Number(ga),
           birthWeightGrams: bw === "" ? null : Number(bw),
-          mrn: full && mrn.trim() !== "" ? mrn.trim() : null,
+          mrn: mrn.trim() !== "" ? mrn.trim() : null,
         },
         full
           ? {
@@ -119,15 +120,13 @@ export default function PatientModal({
           />
         </div>
 
-        {full ? (
-          <FormInput
-            id="new-mrn"
-            label="MRN № (optional)"
-            placeholder="e.g. NEO-2024-001"
-            value={mrn}
-            onChange={(event) => setMrn(event.target.value)}
-          />
-        ) : null}
+        <FormInput
+          id="new-mrn"
+          label="MRN № (optional)"
+          placeholder="e.g. NEO-2024-001"
+          value={mrn}
+          onChange={(event) => setMrn(event.target.value)}
+        />
 
         <div className="flex flex-col gap-1.5">
           <span className="text-sm font-medium text-theme-ink">Sex</span>

@@ -1,16 +1,23 @@
+# Render blueprint — Pal.se EOS inference service.
+# Deploy: Render → New → Blueprint → point at this repo.
+# The old palse-api (Flask/FastAPI auth+db) is gone; Supabase handles auth/db.
 services:
   - type: web
     plan: free
-    name: palse-api
+    name: palse-ml
     runtime: python
-    rootDir: backend
-    buildCommand: "uv sync"
-    startCommand: "uv run fastapi run"
-    region: "singapore"
+    rootDir: service
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    region: singapore
     healthCheckPath: /health
-    autoDeploy: checksPass
+    autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.14.7
-      - key: UV_VERSION
-        value: 0.11.21
+        value: "3.12"
+      # Public-safe project URL — used to fetch Supabase's public JWKS.
+      - key: SUPABASE_URL
+        sync: false
+      # Comma-separated list; update when the production domain is known.
+      - key: ALLOWED_ORIGINS
+        sync: false

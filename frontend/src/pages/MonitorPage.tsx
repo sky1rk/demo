@@ -3,7 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import Notice from "../components/Notice.tsx";
 import Panel from "../components/Panel.tsx";
-import { listAssessments, listPatients } from "../lib/db.ts";
+import RiskBadge from "../components/RiskBadge.tsx";
+import { assessmentPrediction, listAssessments, listPatients } from "../lib/db.ts";
 import { guide } from "../lib/authErrors.ts";
 import { formatPatientName, formatDateTimeLabel } from "../lib/patient.ts";
 import type { Assessment } from "../lib/assessment.ts";
@@ -256,9 +257,24 @@ export default function MonitorPage() {
           </div>
           <div className="flex items-center gap-2 text-xs">
             <span className="text-theme-gray">Risk:</span>
-            <span className="rounded-full border border-theme-line bg-theme-light-gray px-2.5 py-0.5 font-semibold text-theme-gray">
-              Pending scoring
-            </span>
+            {assessment.prediction != null ? (
+              (() => {
+                const prediction = assessmentPrediction(assessment);
+                if (prediction == null) return null;
+                return (
+                  <span className="flex items-center gap-2">
+                    <RiskBadge level={selected.riskLevel} />
+                    <span className="tabular-nums text-theme-gray">
+                      {(prediction.probability * 100).toFixed(1)}%
+                    </span>
+                  </span>
+                );
+              })()
+            ) : (
+              <span className="rounded-full border border-theme-line bg-theme-light-gray px-2.5 py-0.5 font-semibold text-theme-gray">
+                Not scored
+              </span>
+            )}
           </div>
         </Panel>
       ) : null}

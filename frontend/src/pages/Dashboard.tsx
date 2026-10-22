@@ -11,22 +11,34 @@ import Panel from "../components/Panel.tsx";
 import PrimaryButton from "../components/PrimaryButton.tsx";
 import {
   ComorbiditiesChips,
+  LabFields,
   TreatmentChips,
   VitalsFields,
 } from "../components/AssessmentSectionFields.tsx";
 import PatientModal from "../components/PatientModal.tsx";
-import { createAssessment, listPatients } from "../lib/db.ts";
+import PatientSearch from "../components/PatientSearch.tsx";
+import { useAuth } from "../context/useAuth.ts";
+import {
+  createAssessment,
+  latestDraftForPatient,
+  listPatients,
+  savePrediction,
+  updateDraftAssessment,
+} from "../lib/db.ts";
 import type {
+  Assessment,
   AssessmentSections,
   AssessmentStatus,
   MaternalSection,
   NeonatalSection,
 } from "../lib/assessment.ts";
-import { formatPatientName } from "../lib/patient.ts";
+import type { PredictionResult } from "../lib/ml.ts";
+import { engineConfigured, runPrediction } from "../lib/ml.ts";
+import { formatDateLabel, formatPatientName } from "../lib/patient.ts";
 import type { Patient } from "../lib/patient.ts";
 import { usePageTitle } from "../hooks/usePageTitle.ts";
 import { guide } from "../lib/authErrors.ts";
-import { vitalsError } from "../lib/clinicalValidation.ts";
+import { labsError, vitalsError } from "../lib/clinicalValidation.ts";
 
 type SexChoice = "female" | "male";
 type ModeChoice = "vaginal" | "cesarean";
@@ -37,6 +49,7 @@ const STEPS = [
   { short: "Maternal", full: "Maternal Factors" },
   { short: "Neonatal", full: "Neonatal Clinical Signs" },
   { short: "Vitals", full: "Physiological (Hourly)" },
+  { short: "Laboratory", full: "Laboratory Results" },
   { short: "Treatment", full: "Current Treatment" },
   { short: "Comorbidities", full: "Comorbidities" },
 ] as const;
@@ -106,6 +119,11 @@ const EMPTY_SECTIONS: AssessmentSections = {
     oxygenSaturationPct: "",
     respiratoryRatePerMin: "",
   },
+  laboratory: {
+    crpMgL: "",
+    wbcCount: "",
+    plateletCount: "",
+  },
   treatment: {
     centralVenousLine: false,
     umbilicalArterialLine: false,
@@ -121,25 +139,41 @@ const EMPTY_SECTIONS: AssessmentSections = {
 };
 
 /**
- * Phase 1 assessment wizard: six intake sections stored as JSONB on the
- * patient's assessment row. The results panel is UI-only until the
- * prediction engine is connected.
+ * Assessment wizard: seven intake sections stored as JSONB on the patient's
+ * assessment row. Completing the wizard runs the EOS inference service
+ * (`lib/ml.ts` → legacy residual-ensemble stack) when VITE_ML_API_URL is
+ * configured; the result lands in the Analysis results panel and on the
+ * assessment row. Without the engine the wizard still stores safely (the
+ * engine scores retroactively once deployed).
  */
 export default function Dashboard() {
   usePageTitle("Assessment");
 
+  const { session } = useAuth();
+  const accessToken = session?.access_token ?? null;
+
   const [step, setStep] = useState(1);
   const [patientId, setPatientId] = useState<string | null>(null);
   const [sections, setSections] = useState<AssessmentSections>(EMPTY_SECTIONS);
+  /** The patient's open draft row once resumed; null fresh-wizard until "Resume draft". */
+  const [resume, setResume] = useState<Assessment | null>(null);
+  const [resumeLoaded, setResumeLoaded] = useState(false);
 
   const [patients, setPatients] = useState<Patient[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [engineNotice, setEngineNotice] = useState<string | null>(null);
 
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
   const [saving, setSaving] = useState<AssessmentStatus | null>(null);
+  const [predicting, setPredicting] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ name: string; status: AssessmentStatus } | null>(null);
+  const [result, setResult] = useState<PredictionResult | null>(null);
+  const [saved, setSaved] = useState<{
+    name: string;
+    status: AssessmentStatus;
+    resumed?: boolean;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -158,6 +192,34 @@ export default function Dashboard() {
       active = false;
     };
   }, [reloadKey]);
+
+  // Track the selected patient's open draft so step 1 offers Resume.
+  useEffect(() => {
+    if (patientId == null) {
+      setResume(null);
+      setResumeLoaded(false);
+      return;
+    }
+    let active = true;
+    latestDraftForPatient(patientId)
+      .then((draft) => {
+        if (active) {
+          setResume(draft);
+          setResumeLoaded(false);
+        }
+      })
+      .catch((error: unknown) => {
+        // Draft discovery is a convenience — never block the wizard on it.
+        console.error("[palse] draft lookup failed", error);
+        if (active) {
+          setResume(null);
+          setResumeLoaded(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [patientId]);
 
   const selectedPatient = useMemo(
     () => patients?.find((p) => p.id === patientId) ?? null,
@@ -197,6 +259,23 @@ export default function Dashboard() {
     });
   }
 
+  /** Loads the stored draft's seven sections into the builder. */
+  function resumeDraft() {
+    if (resume == null) return;
+    setSections({
+      demographic: resume.demographic,
+      maternal: resume.maternal,
+      neonatal: resume.neonatal,
+      vitals: resume.vitals,
+      laboratory: resume.laboratory,
+      treatment: resume.treatment,
+      comorbidities: resume.comorbidities,
+    });
+    setResumeLoaded(true);
+    setStepError(null);
+    setEngineNotice(null);
+  }
+
   function goNext() {
     const error = validateStep(step, patientId, sections);
     if (error != null) {
@@ -222,20 +301,88 @@ export default function Dashboard() {
       }
     }
 
+    const patient = patientId as string;
     setSaving(status);
     try {
-      await createAssessment({
-        patientId: patientId as string,
-        status,
-        sections,
-      });
+      let assessmentId: string;
+      if (resume != null) {
+        // Resumed draft: update the existing record in place (no duplicates);
+        // completing it flips the row's status before scoring it.
+        const stored = await updateDraftAssessment(resume.id, sections, status);
+        assessmentId = stored.id;
+      } else {
+        assessmentId = await createAssessment({
+          patientId: patient,
+          status,
+          sections,
+        });
+      }
+
+      // Engine scoring happens for completed assessments only (drafts are
+      // scored retroactively once the engine batch is wired). A failure here
+      // never loses the saved assessment — the panel explains the fallback.
+      if (status === "complete") {
+        if (!engineConfigured()) {
+          setEngineNotice(
+            "Saved. The prediction engine is not configured for this build, so the record will be scored retroactively once scoring is deployed.",
+          );
+        } else if (accessToken != null) {
+          setPredicting(true);
+          try {
+            const prediction = await runPrediction(sections, accessToken);
+            await savePrediction(assessmentId, patient, prediction);
+            setResult(prediction);
+            setPatients((prev) =>
+              (prev ?? []).map((row) =>
+                row.id === patient
+                  ? {
+                    ...row,
+                    riskLevel:
+                      prediction.riskLabel === "HIGH RISK"
+                        ? "high"
+                        : prediction.riskLabel === "LOW RISK"
+                          ? "low"
+                          : "moderate",
+                  }
+                  : row,
+              ),
+            );
+          } catch (error) {
+            console.error("[palse] prediction failed", error);
+            setEngineNotice(
+              error instanceof Error
+                ? `Saved without a score: ${error.message} The record will be scored retroactively once the engine is reachable.`
+                : "Saved without a score: the prediction engine could not be reached. The record will be scored retroactively.",
+            );
+          } finally {
+            setPredicting(false);
+          }
+        } else {
+          setEngineNotice(
+            "Saved. Sign in again to run live scoring — the record will be scored retroactively meanwhile.",
+          );
+        }
+      }
+
       setSaved({
-        name: selectedPatient != null ? formatPatientName(selectedPatient) : "The patient",
+        name:
+          selectedPatient != null
+            ? formatPatientName(selectedPatient)
+            : "The patient",
         status,
+        resumed: resume != null && status === "complete",
       });
+      if (status === "complete") {
+        // The draft row is now a completed assessment — the resume banner
+        // shouldn't offer it again on the next visit.
+        setResume(null);
+        setResumeLoaded(false);
+      }
     } catch (error) {
       console.error("[palse] assessment save failed", error);
-      setStepError(guide(error, "Could not save the assessment. Please try again."));
+      setStepError(
+        guide(error, "Could not save the assessment. Please try again."),
+      );
     } finally {
       setSaving(null);
     }
@@ -243,10 +390,14 @@ export default function Dashboard() {
 
   function startNew() {
     setSaved(null);
+    setEngineNotice(null);
+    setResult(null);
     setStep(1);
     setPatientId(null);
     setSections(EMPTY_SECTIONS);
     setStepError(null);
+    setResume(null);
+    setResumeLoaded(false);
   }
 
   if (saved != null) {
@@ -254,6 +405,7 @@ export default function Dashboard() {
       <SavedConfirmation
         patientName={saved.name}
         status={saved.status}
+        scored={result != null}
         onNew={startNew}
       />
     );
@@ -267,16 +419,17 @@ export default function Dashboard() {
         <p className="text-xs font-bold uppercase tracking-wide text-theme-maroon">
           Clinical intake workflow
         </p>
-        <h1 className="text-2xl font-bold text-theme-ink">Neonatal Sepsis Prediction</h1>
+        <h1 className="text-2xl font-bold text-theme-ink">
+          Neonatal Sepsis Prediction
+        </h1>
         <p className="text-sm text-theme-gray">
-          Complete the six intake sections. Records are saved directly to the
-          patient&apos;s clinical history.
+          Complete the seven intake sections. Records are saved directly to the
+          patient&apos;s clinical history and scored by the prediction engine on
+          completion.
         </p>
       </header>
 
-      {stepError ? (
-        <Notice tone="danger">{stepError}</Notice>
-      ) : null}
+      {stepError ? <Notice tone="danger">{stepError}</Notice> : null}
       {loadError ? (
         <Notice tone="danger">
           {loadError}{" "}
@@ -290,13 +443,38 @@ export default function Dashboard() {
         </Notice>
       ) : null}
 
+      {engineNotice ? (
+        <Notice tone={result != null ? "success" : "info"}>
+          {engineNotice}
+        </Notice>
+      ) : null}
+
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-5">
-          <StepRail current={step} onJump={(target) => { setStepError(null); setStep(target); }} />
+          <StepRail
+            current={step}
+            onJump={(target) => {
+              setStepError(null);
+              setStep(target);
+            }}
+          />
 
-          <Panel title={STEPS[step - 1].full} kicker={`Step ${step} of ${STEPS.length}`}>
+          <Panel
+            title={STEPS[step - 1].full}
+            kicker={`Step ${step} of ${STEPS.length}`}
+          >
             <div className="flex flex-col gap-5">
-              {renderStep(step, { patients, patientId, sections, patch, selectPatient, onQuickCreate: () => setQuickCreateOpen(true) })}
+              {renderStep(step, {
+                patients,
+                patientId,
+                sections,
+                patch,
+                selectPatient,
+                onQuickCreate: () => setQuickCreateOpen(true),
+                resume,
+                resumeLoaded,
+                onResumeDraft: resumeDraft,
+              })}
 
               <div className="flex items-center justify-between gap-3 border-t border-theme-line pt-5">
                 {step > 1 ? (
@@ -313,7 +491,7 @@ export default function Dashboard() {
                   </span>
                 )}
 
-                <div className="flex items-center gap-3">
+                <div className="flex flex-1 items-center gap-3">
                   {isLastStep ? (
                     <>
                       <button
@@ -327,14 +505,20 @@ export default function Dashboard() {
                       <PrimaryButton
                         pending={saving === "complete"}
                         onClick={() => void handleSave("complete")}
-                        className="w-auto px-5"
+                        className="w-auto px-5 flex-1"
                         type="button"
                       >
-                        Complete assessment
+                        {resume != null
+                          ? "Calculate risk score (finish draft)"
+                          : "Complete assessment"}
                       </PrimaryButton>
                     </>
                   ) : (
-                    <PrimaryButton type="button" onClick={goNext} className="w-auto px-5">
+                    <PrimaryButton
+                      type="button"
+                      onClick={goNext}
+                      className="w-auto px-5"
+                    >
                       Next
                     </PrimaryButton>
                   )}
@@ -345,7 +529,12 @@ export default function Dashboard() {
         </div>
 
         <aside className="min-w-0">
-          <ResultsPanel patient={selectedPatient} />
+          <ResultsPanel
+            patient={selectedPatient}
+            result={result}
+            predicting={predicting}
+            engineConfigured={engineConfigured()}
+          />
         </aside>
       </div>
 
@@ -371,12 +560,13 @@ type DashboardSectionProps = {
   ) => void;
   selectPatient: (id: string) => void;
   onQuickCreate: () => void;
+  /** Selected patient's open draft + load action; null when none exists. */
+  resume: Assessment | null;
+  resumeLoaded: boolean;
+  onResumeDraft: () => void;
 };
 
-function renderStep(
-  step: number,
-  props: DashboardSectionProps,
-): ReactNode {
+function renderStep(step: number, props: DashboardSectionProps): ReactNode {
   switch (step) {
     case 1:
       return <DemographicStep {...props} />;
@@ -387,8 +577,10 @@ function renderStep(
     case 4:
       return <VitalsStep {...props} />;
     case 5:
-      return <ChipStep {...props} section="treatment" />;
+      return <LabStep {...props} />;
     case 6:
+      return <ChipStep {...props} section="treatment" />;
+    case 7:
       return <ChipStep {...props} section="comorbidities" />;
     default:
       return null;
@@ -404,8 +596,12 @@ function DemographicStep({
   patch,
   selectPatient,
   onQuickCreate,
+  resume,
+  resumeLoaded,
+  onResumeDraft,
 }: DashboardSectionProps) {
   const demographic = sections.demographic;
+  const selected = patients?.find((p) => p.id === patientId) ?? null;
   const loading = patients === null;
 
   return (
@@ -414,36 +610,49 @@ function DemographicStep({
         <label htmlFor="patient" className="text-sm font-medium text-theme-ink">
           Patient
         </label>
-        <div className="flex gap-2.5">
-          <select
-            id="patient"
-            value={patientId ?? ""}
-            onChange={(event) => selectPatient(event.target.value)}
-            disabled={loading}
-            className="w-full rounded-lg border border-theme-line bg-white px-3.5 py-2 text-sm text-theme-ink transition-colors focus:border-theme-maroon focus:outline-none focus:ring-2 focus:ring-theme-maroon/25 disabled:opacity-60"
-          >
-            <option value="">{loading ? "Loading registry…" : "Select a patient"}</option>
-            {patients?.map((patient) => (
-              <option key={patient.id} value={patient.id}>
-                {formatPatientName(patient)}
-                {patient.mrn ? ` — MRN ${patient.mrn}` : ""}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={onQuickCreate}
-            className="shrink-0 rounded-lg border border-theme-maroon px-3.5 py-2 text-sm font-semibold text-theme-maroon transition-colors hover:bg-theme-maroon/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-theme-maroon"
-          >
-            ＋ New
-          </button>
-        </div>
+        <PatientSearch
+          patients={patients}
+          selected={selected}
+          disabled={loading}
+          onSelect={selectPatient}
+          onQuickCreate={onQuickCreate}
+        />
         {patients !== null && patients.length === 0 ? (
           <p className="text-xs text-theme-gray">
             The registry is empty — use ＋ New to register the first patient.
           </p>
         ) : null}
       </div>
+
+      {resume != null ? (
+        <div
+          className={`md:col-span-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border px-4 py-3 text-sm ${
+            resumeLoaded
+              ? "border-theme-line bg-theme-light-gray/60 text-theme-ink"
+              : "border-theme-maroon/30 bg-theme-maroon/5 text-theme-ink"
+          }`}
+        >
+          <span>
+            {resumeLoaded ? (
+              <>
+                Draft loaded ({formatDateLabel(resume.createdAt)}) — saving
+                updates this record in place.
+              </>
+            ) : (
+              <>
+                Draft in progress from {formatDateLabel(resume.createdAt)} —{" "}
+                <button
+                  type="button"
+                  onClick={onResumeDraft}
+                  className="font-semibold text-theme-maroon underline decoration-2 underline-offset-2 hover:text-theme-maroon/80"
+                >
+                  Resume
+                </button>
+              </>
+            )}
+          </span>
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-medium text-theme-ink">Sex</span>
@@ -456,7 +665,9 @@ function DemographicStep({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-theme-ink">Delivery mode</span>
+        <span className="text-sm font-medium text-theme-ink">
+          Delivery mode
+        </span>
         <ChoiceGroup<ModeChoice>
           options={MODE_OPTIONS}
           value={demographic.deliveryMode}
@@ -522,7 +733,9 @@ function MaternalStep({
         min={10}
         max={70}
         value={maternal.maternalAge}
-        onChange={(event) => patch("maternal", { maternalAge: event.target.value })}
+        onChange={(event) =>
+          patch("maternal", { maternalAge: event.target.value })
+        }
       />
       <MaternalChoicer
         label="ANC visits (>= 4)"
@@ -652,6 +865,24 @@ function VitalsStep({
   );
 }
 
+/* ------------------------------ Step 5 ---------------------------------- */
+
+function LabStep({
+  sections,
+  patch,
+}: {
+  sections: AssessmentSections;
+  patch: DashboardSectionProps["patch"];
+}) {
+  return (
+    <LabFields
+      value={sections.laboratory}
+      onChange={(next) => patch("laboratory", next)}
+      idPrefix="labs"
+    />
+  );
+}
+
 /* --------------------------- Steps 5 & 6 -------------------------------- */
 
 function ChipStep({
@@ -752,15 +983,32 @@ function ToggleSwitch({
   );
 }
 
-function ResultsPanel({ patient }: { patient: Patient | null }) {
-  const rows = [
-    "Sepsis risk probability",
-    "Clinical interpretation",
-    "Recommended actions",
-  ];
+function ResultsPanel({
+  patient,
+  result,
+  predicting,
+  engineConfigured,
+}: {
+  patient: Patient | null;
+  result: PredictionResult | null;
+  predicting: boolean;
+  engineConfigured: boolean;
+}) {
+  if (result != null) {
+    return <ScoredResultsPanel result={result} predicting={predicting} />;
+  }
+
+  const intro = predicting
+    ? "Scoring with the prediction engine…"
+    : engineConfigured
+      ? "Complete the wizard and the engine will score this assessment."
+      : "The prediction engine is not configured for this build.";
 
   return (
-    <Panel kicker="Analysis results" title="Waiting for the prediction engine">
+    <Panel
+      kicker="Analysis results"
+      title={predicting ? "Running engine…" : "Waiting for scoring"}
+    >
       <div className="rounded-lg border border-theme-line bg-theme-light-gray/60 px-4 py-3">
         {patient != null ? (
           <>
@@ -768,7 +1016,8 @@ function ResultsPanel({ patient }: { patient: Patient | null }) {
               {formatPatientName(patient)}
             </p>
             <p className="mt-0.5 text-xs text-theme-gray">
-              {patient.mrn ? `MRN ${patient.mrn} · ` : ""}Risk level: pending scoring
+              {patient.mrn ? `MRN ${patient.mrn} · ` : ""}Risk level: pending
+              scoring
             </p>
           </>
         ) : (
@@ -778,19 +1027,126 @@ function ResultsPanel({ patient }: { patient: Patient | null }) {
         )}
       </div>
 
-      <ul className="flex flex-col gap-3" aria-hidden>
-        {rows.map((row) => (
-          <li key={row} className="flex items-center gap-3">
-            <span className="h-2 w-2 shrink-0 rounded-full bg-theme-line" />
-            <span className="text-sm text-theme-gray">{row}</span>
-          </li>
-        ))}
-      </ul>
+      {predicting ? (
+        <p
+          className="flex items-center gap-2.5 text-sm text-theme-ink"
+          aria-live="polite"
+        >
+          <span
+            aria-hidden
+            className="h-4 w-4 animate-spin rounded-full border-2 border-theme-maroon border-t-transparent"
+          />
+          Scoring with the prediction engine…
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-3" aria-hidden>
+          {[
+            "Sepsis risk probability",
+            "Clinical interpretation",
+            "Recommended actions",
+          ].map((row) => (
+            <li key={row} className="flex items-center gap-3">
+              <span className="h-2 w-2 shrink-0 rounded-full bg-theme-line" />
+              <span className="text-sm text-theme-gray">{row}</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <p className="border-t border-theme-line pt-4 text-xs leading-relaxed text-theme-gray">
-        Scores are computed by the ML prediction service, which is not connected
-        yet. Assessments are stored safely in the meantime and will be scored
+        {intro} Assessments are stored safely in the meantime and will be scored
         retroactively once the engine is live.
+      </p>
+    </Panel>
+  );
+}
+
+/* ------------------------- Scored results view -------------------------- */
+
+const DONUT_COLORS: Record<string, string> = {
+  HIGH: "#b42318",
+  MODERATE: "#9a5b00",
+  LOW: "#1f7a45",
+};
+
+function ScoredResultsPanel({
+  result,
+  predicting,
+}: {
+  result: PredictionResult;
+  predicting: boolean;
+}) {
+  const percent = Math.max(0, Math.min(100, result.probabilityPercent * 100));
+  const color =
+    DONUT_COLORS[result.riskLabel.split(" ")[0]] ?? DONUT_COLORS.MODERATE;
+  const tone =
+    result.riskLabel === "HIGH RISK"
+      ? { bg: "bg-risk-high-bg", fg: "text-risk-high-fg" }
+      : result.riskLabel === "LOW RISK"
+        ? { bg: "bg-risk-low-bg", fg: "text-risk-low-fg" }
+        : { bg: "bg-risk-moderate-bg", fg: "text-risk-moderate-fg" };
+
+  return (
+    <Panel kicker="Analysis results" title={result.resultTitle}>
+      <div className="flex items-center gap-4">
+        <div
+          className="relative h-28 w-28 shrink-0 rounded-full"
+          style={{
+            background: `conic-gradient(${color} ${percent}%, var(--color-theme-line, #e5e7eb) ${percent}%)`,
+          }}
+          role="img"
+          aria-label={`Sepsis risk probability ${result.probabilityPercent}%`}
+        >
+          <div className="absolute inset-[10px] flex h-[86px] w-[86px] flex-col items-center justify-center rounded-full bg-white">
+            <span className="text-xl font-bold text-theme-ink">
+              {result.probabilityPercent}%
+            </span>
+            <span
+              className={`mt-0.5 text-[10px] font-bold uppercase ${tone.fg}`}
+            >
+              {result.predictedEos ? "Predicted EOS" : "Below threshold"}
+            </span>
+          </div>
+        </div>
+        <div className="min-w-0 flex-1">
+          <span
+            className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${tone.bg} ${tone.fg}`}
+          >
+            {result.riskLabel}
+          </span>
+          <p className="mt-2 text-xs text-theme-gray">
+            Decision threshold {result.threshold.toFixed(2)} ·{" "}
+            {result.predictedEos ? "EOS predicted" : "no EOS prediction"}
+          </p>
+        </div>
+      </div>
+
+      {result.interpretation !== "" ? (
+        <p className="text-sm leading-relaxed text-theme-ink">
+          {result.interpretation}
+        </p>
+      ) : null}
+
+      {result.recommendedActions.length > 0 ? (
+        <div>
+          <p className="text-xs font-bold uppercase tracking-wide text-theme-maroon">
+            Recommended actions
+          </p>
+          <ul className="mt-2 flex list-inside list-disc flex-col gap-1.5">
+            {result.recommendedActions.map((action) => (
+              <li key={action} className="text-sm text-theme-gray">
+                {action}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <p className="border-t border-theme-line pt-3 text-xs text-theme-gray">
+        Model provenance — XGBoost {Math.round(result.xgbEosProbability * 100)}%
+        · TFT {Math.round(result.tftEosProbability * 100)}% ({result.tftSource})
+        · {result.inferenceMs} ms
+        {predicting ? " · rescoring…" : ""}
       </p>
     </Panel>
   );
@@ -799,10 +1155,12 @@ function ResultsPanel({ patient }: { patient: Patient | null }) {
 function SavedConfirmation({
   patientName,
   status,
+  scored,
   onNew,
 }: {
   patientName: string;
   status: AssessmentStatus;
+  scored: boolean;
   onNew: () => void;
 }) {
   return (
@@ -814,10 +1172,17 @@ function SavedConfirmation({
         {status === "draft" ? "Draft saved" : "Assessment complete"}
       </h2>
       <p className="mx-auto mt-2 max-w-sm text-sm text-theme-gray">
-        {patientName}&apos;s record has been {status === "draft" ? "stored as a draft" : "recorded"}.
-        Scoring activates once the prediction engine is connected.
+        {patientName}&apos;s record has been{" "}
+        {status === "draft" ? "stored as a draft" : "recorded"}.
+        {scored
+          ? "It has been scored by the prediction engine."
+          : " It has not been scored yet; it will be scored retroactively once the prediction engine is reachable."}
       </p>
-      <PrimaryButton onClick={onNew} className="mx-auto mt-6 w-auto px-5" type="button">
+      <PrimaryButton
+        onClick={onNew}
+        className="mx-auto mt-6 w-auto px-5"
+        type="button"
+      >
         Start a new assessment
       </PrimaryButton>
     </Panel>
@@ -877,6 +1242,9 @@ function validateStep(
     }
     case 4: {
       return vitalsError(sections.vitals);
+    }
+    case 5: {
+      return labsError(sections.laboratory);
     }
     default:
       return null;

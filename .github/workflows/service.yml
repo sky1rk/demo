@@ -1,0 +1,45 @@
+# Inference-service checks. Kept separate from ci.yml (frontend quality
+# gate, which merges from the ci/config-github-actions branch) so the two
+# never conflict; only runs when the Python side changes.
+name: Service CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "service/**"
+      - ".github/workflows/service.yml"
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.12 matches render.yaml's PYTHON_VERSION — same interpreter the
+      # artifacts are served with.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: service/requirements.txt
+
+      - name: Install runtime + test dependencies
+        run: pip install -r requirements.txt httpx pytest
+
+      - name: Model artifacts present
+        run: |
+          test -f models/eos_xgboost_pipeline.joblib &&
+          test -f models/eos_residual_ensemble.joblib &&
+          test -f models/eos_tft_state_dict.pt
+
+      # REQUIRE_AUTH=false makes verify_bearer_token pass through — CI tests
+      # the scoring contract, not Supabase's JWKS (which needs a live project).
+      - name: Smoke the engine contract
+        env:
+          REQUIRE_AUTH: "false"
+        run: python -m pytest -q tests/
