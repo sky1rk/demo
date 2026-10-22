@@ -94,3 +94,6 @@ dist-ssr
 *.njsproj
 *.sln
 
+
+# Local engine env (public-safe, but env files stay untracked by convention)
+service/.env

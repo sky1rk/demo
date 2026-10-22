@@ -170,8 +170,17 @@ export async function runPrediction(
   }
 
   if (response.status === 401) {
-    // Session expired mid-flow — surface through the normal auth error path.
-    throw new Error("Your session expired. Please sign in again to run scoring.");
+    // Propagate the engine's reason: a real expired session and a
+    // misconfigured engine (e.g. SUPABASE_URL unset) both arrive as 401, but
+    // need very different remedies. Fall back to the session-expired guidance
+    // when the engine's detail is unavailable.
+    const detail =
+      body != null && typeof body === "object" && "detail" in body
+        ? String((body as { detail: unknown }).detail)
+        : null;
+    throw new Error(
+      detail ?? "Your session expired. Please sign in again to run scoring.",
+    );
   }
   if (!response.ok) {
     const detail =

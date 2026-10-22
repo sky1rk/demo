@@ -8,6 +8,19 @@ frontend via supabase-js.
 
 import os
 
+# Optional local overrides (service/.env) so every launch style — `fastapi dev`
+# from a plain shell, uvicorn, Render — reaches the same configuration without
+# remembering env vars. Real env vars always win; the file is gitignored.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
+        override=False,
+    )
+except ImportError:  # python-dotenv ships with fastapi-cli; plain uvicorn may skip it
+    pass
+
 # Public-safe: the project URL is embedded in the frontend build already.
 # Used for two things: fetching Supabase's public JWKS to verify access
 # tokens, and (once configured) locating the training CSV for live TFT.
